@@ -16,3 +16,13 @@ test("Windows updater health-checks the new app and rolls back install plus oper
   assert.match(script, /Start-Process -FilePath \$TargetExe/u)
   assert.match(script, /Restore-PreviousVersion/u)
 })
+
+test("Windows updater terminates the target process tree, not just OpenChatX.exe", () => {
+  const script = buildWindowsUpdaterScript()
+
+  // The known target PID is now used to tear down the process tree so the
+  // Node.js runtime host (node.exe) and child processes are reclaimed.
+  assert.match(script, /\$TargetPid/u)
+  assert.match(script, /ProcessId -eq \$TargetPid/u)
+  assert.match(script, /ParentProcessId -eq \$TargetPid/u)
+})
