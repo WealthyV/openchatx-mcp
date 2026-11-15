@@ -4,7 +4,7 @@ import process from "node:process"
 import type { McpServer } from "@modelcontextprotocol/server"
 import { z } from "zod"
 import { childProcessEnvironment } from "../../child-environment.js"
-import { signalProcessGroup } from "../../child-process-termination.js"
+import { startProcessGroupTermination } from "../../child-process-termination.js"
 import { MCP_CONFIG } from "../../config.js"
 import { shellCommandArgs } from "../../host-platform.js"
 import type { JobManager } from "../../jobs/job-manager.js"
@@ -330,7 +330,18 @@ async function runCommand(
     child.stdout.on("data", append)
     child.stderr.on("data", append)
 
-    const terminate = () => signalProcessGroup(child, "SIGTERM")
+    // Escalate SIGTERM -> grace -> SIGKILL so a command that traps or ignores
+    // SIGTERM is still reclaimed instead of running unbounded after a timeout or
+    // a forced stop. Let the whole grace elapse: descendants of the shell may
+    // still be shutting down after the shell itself exits, and they must get the
+    // full window before the process group is force-killed.
+    const KILL_GRACE_MS = 2000
+    let terminating = false
+    const terminate = () => {
+      if (terminating) return
+      terminating = true
+      startProcessGroupTermination(child, { graceMs: KILL_GRACE_MS })
+    }
     const timeout = setTimeout(() => {
       timedOut = true
       terminate()
@@ -339,14 +350,20 @@ async function runCommand(
     const abort = () => terminate()
     signal.addEventListener("abort", abort, { once: true })
 
-    child.once("error", (error) => {
+    function cleanup(): void {
       clearTimeout(timeout)
       signal.removeEventListener("abort", abort)
+      // Deliberately do not cancel the pending escalation. The shell can exit on
+      // SIGTERM while children in its process group are still alive; cancelling
+      // here would drop the SIGKILL and leave those descendants running forever.
+    }
+
+    child.once("error", (error) => {
+      cleanup()
       reject(error)
     })
     child.once("close", (code) => {
-      clearTimeout(timeout)
-      signal.removeEventListener("abort", abort)
+      cleanup()
       if (signal.aborted) {
         if (isUserForcedStop(signal.reason)) {
           resolvePromise({ exitCode: code ?? 1, output, timedOut, interrupted: true })
