@@ -32,11 +32,25 @@ $HealthUrl = $env:OPENCHATX_UPDATE_HEALTH_URL
 $TargetDir = Split-Path -Parent $TargetExe
 
 function Stop-TargetApp {
+  # Terminate every OpenChatX.exe instance by executable path.
   Get-CimInstance Win32_Process |
     Where-Object { $_.ExecutablePath -eq $TargetExe } |
     ForEach-Object {
       try { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null } catch {}
     }
+  # Also terminate the process tree rooted at the known target PID. This reclaims
+  # the Node.js runtime host (node.exe) and any child processes. Otherwise an
+  # orphaned runtime can keep the install directory open and break the rollback
+  # file operations.
+  if ($TargetPid -gt 0) {
+    try {
+      Get-CimInstance Win32_Process |
+        Where-Object { $_.ProcessId -eq $TargetPid -or $_.ParentProcessId -eq $TargetPid } |
+        ForEach-Object {
+          try { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null } catch {}
+        }
+    } catch {}
+  }
 }
 
 function Restore-PreviousVersion {
