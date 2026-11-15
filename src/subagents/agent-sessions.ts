@@ -946,6 +946,7 @@ export class SubagentSessions {
         messages: session.messages,
         profile,
         provider,
+        sessionId: session.session_id,
         apiKey,
         signal,
         ...(session.plan ? { plan: session.plan } : {}),
@@ -988,6 +989,7 @@ export class SubagentSessions {
     return generateWithRecovery({
       ...options,
       providerId: profile.provider,
+      sessionId: session.session_id,
       messages: () => session.messages,
       compact: () =>
         this.compactContext(session, {
