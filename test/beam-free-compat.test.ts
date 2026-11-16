@@ -88,26 +88,35 @@ test("OpenCode Go Beam Free omits unsupported thinking fields and flattens root 
 
   const unionSchema = {
     description: "Summarize content using one supported format.",
-    oneOf: [
+    allOf: [
       {
-        type: "object",
-        title: "Text summary",
-        properties: {
-          mode: { type: "string", const: "text" },
-          text: { type: "string" },
-        },
-        required: ["mode", "text"],
-        additionalProperties: false,
+        oneOf: [
+          {
+            type: "object",
+            title: "Text summary",
+            properties: {
+              mode: { type: "string", const: "text" },
+              text: { type: "string" },
+            },
+            required: ["mode", "text"],
+            additionalProperties: false,
+          },
+          {
+            type: "object",
+            title: "Structured summary",
+            properties: {
+              mode: { type: "string", const: "structured" },
+              format: { type: "string", enum: ["json", "yaml"] },
+            },
+            required: ["mode", "format"],
+            additionalProperties: false,
+          },
+        ],
       },
       {
         type: "object",
-        title: "Structured summary",
-        properties: {
-          mode: { type: "string", const: "structured" },
-          format: { type: "string", enum: ["json", "yaml"] },
-        },
-        required: ["mode", "format"],
-        additionalProperties: false,
+        properties: { agent_id: { type: "string", format: "uuid" } },
+        required: ["agent_id"],
       },
     ],
   }
@@ -148,12 +157,12 @@ test("OpenCode Go Beam Free omits unsupported thinking fields and flattens root 
   assert.equal(beamParameters.type, "object")
   for (const unsupported of ["oneOf", "anyOf", "allOf", "enum", "const", "not"])
     assert.equal(unsupported in beamParameters, false)
-  assert.deepEqual(beamParameters.required, ["mode"])
+  assert.deepEqual(beamParameters.required, ["mode", "agent_id"])
   assert.equal(beamParameters.additionalProperties, false)
   const properties = beamParameters.properties as Record<string, unknown>
   assert.ok(properties.mode && typeof properties.mode === "object")
   assert.ok(Array.isArray((properties.mode as Record<string, unknown>).anyOf))
-  assert.ok(properties.text && properties.format)
+  assert.ok(properties.text && properties.format && properties.agent_id)
 
   const deepseekBody = requests[1]
   assert.ok(deepseekBody)
@@ -161,7 +170,7 @@ test("OpenCode Go Beam Free omits unsupported thinking fields and flattens root 
   const deepseekTools = deepseekBody.tools as Array<{
     function: { parameters: Record<string, unknown> }
   }>
-  assert.equal("oneOf" in (deepseekTools[0]?.function.parameters ?? {}), true)
+  assert.equal("allOf" in (deepseekTools[0]?.function.parameters ?? {}), true)
 
   const unrelatedBody = requests[2]
   assert.ok(unrelatedBody)
@@ -169,5 +178,5 @@ test("OpenCode Go Beam Free omits unsupported thinking fields and flattens root 
   const unrelatedTools = unrelatedBody.tools as Array<{
     function: { parameters: Record<string, unknown> }
   }>
-  assert.equal("oneOf" in (unrelatedTools[0]?.function.parameters ?? {}), true)
+  assert.equal("allOf" in (unrelatedTools[0]?.function.parameters ?? {}), true)
 })

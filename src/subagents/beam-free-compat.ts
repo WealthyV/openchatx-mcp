@@ -17,28 +17,65 @@ export function isOpenCodeGoBeamFree(
 
 /**
  * Beam Free rejects JSON Schema composition keywords at the function-parameters
- * root. Project object unions into a plain object, retaining property variants
- * and documenting branch-specific required fields for the model.
+ * root. Expand object compositions into alternatives, then project those
+ * alternatives into one object schema with property-level unions.
  */
 export function beamFreeFunctionParameters(
   schema: Record<string, unknown>
 ): Record<string, unknown> {
-  const { oneOf, anyOf, allOf, enum: _enum, const: _const, not: _not, ...root } = schema
-  const unionBranches = schemaBranches(oneOf ?? anyOf)
-  const intersectionBranches = schemaBranches(allOf)
-  const branches = [...unionBranches, ...intersectionBranches]
-  const properties = mergeProperties(root, unionBranches, intersectionBranches)
-  const required = mergeRequired(root, unionBranches, intersectionBranches)
-  const description = describeVariants(root.description, branches)
+  const alternatives = expandObjectSchema(schema)
+  const properties = mergeProperties(alternatives)
+  const required = mergeRequired(alternatives)
+  const description = describeVariants(schema.description, alternatives)
   return {
-    ...root,
     type: "object",
     properties,
     ...(required.length ? { required } : {}),
-    ...(disallowsAdditionalProperties(root, unionBranches, intersectionBranches)
+    ...(alternatives.length > 0 &&
+    alternatives.every((branch) => branch.additionalProperties === false)
       ? { additionalProperties: false }
       : {}),
     ...(description ? { description } : {}),
+  }
+}
+
+function expandObjectSchema(schema: Record<string, unknown>): Record<string, unknown>[] {
+  const { oneOf, anyOf, allOf, enum: _enum, const: _const, not: _not, ...base } = schema
+  const union = schemaBranches(oneOf ?? anyOf)
+  let alternatives = union.length ? union.flatMap(expandObjectSchema) : [base]
+  if (union.length) alternatives = alternatives.map((branch) => intersectSchemas(base, branch))
+
+  for (const intersection of schemaBranches(allOf)) {
+    const intersectionAlternatives = expandObjectSchema(intersection)
+    alternatives = alternatives.flatMap((left) =>
+      intersectionAlternatives.map((right) => intersectSchemas(left, right))
+    )
+  }
+  return alternatives
+}
+
+function intersectSchemas(
+  left: Record<string, unknown>,
+  right: Record<string, unknown>
+): Record<string, unknown> {
+  const leftProperties = schemaProperties(left)
+  const rightProperties = schemaProperties(right)
+  const properties: Record<string, unknown> = { ...leftProperties }
+  for (const [name, schema] of Object.entries(rightProperties)) {
+    const existing = properties[name]
+    properties[name] = existing ? { allOf: [existing, schema] } : schema
+  }
+  const description = [left.description, right.description]
+    .filter((value): value is string => typeof value === "string")
+    .join(" ")
+  return {
+    properties,
+    required: [...new Set([...stringArray(left.required), ...stringArray(right.required)])],
+    ...(left.additionalProperties === false || right.additionalProperties === false
+      ? { additionalProperties: false }
+      : {}),
+    ...(description ? { description } : {}),
+    ...(typeof left.title === "string" ? { title: left.title } : {}),
   }
 }
 
@@ -46,94 +83,47 @@ function schemaBranches(value: unknown): Record<string, unknown>[] {
   return Array.isArray(value) ? value.filter(isRecord) : []
 }
 
-function mergeProperties(
-  root: Record<string, unknown>,
-  unionBranches: Record<string, unknown>[],
-  intersectionBranches: Record<string, unknown>[]
-): Record<string, unknown> {
-  const properties: Record<string, unknown> = isRecord(root.properties)
-    ? { ...root.properties }
-    : {}
-  const unionProperties = unionBranches.map(schemaProperties)
-  const intersectionProperties = intersectionBranches.map(schemaProperties)
-  const names = new Set([
-    ...Object.keys(properties),
-    ...unionProperties.flatMap((entry) => Object.keys(entry)),
-    ...intersectionProperties.flatMap((entry) => Object.keys(entry)),
-  ])
-  for (const name of names) {
-    const unionSchema = combineSchemaVariants(
-      unionProperties.map((entry) => entry[name]),
-      "anyOf"
-    )
-    const intersectionSchema = combineSchemaVariants(
-      [properties[name], ...intersectionProperties.map((entry) => entry[name])],
-      "allOf"
-    )
-    properties[name] = combinePropertyConstraints(unionSchema, intersectionSchema)
-  }
-  return properties
-}
-
 function schemaProperties(schema: Record<string, unknown>): Record<string, unknown> {
   return isRecord(schema.properties) ? schema.properties : {}
 }
 
-function combineSchemaVariants(values: unknown[], keyword: "anyOf" | "allOf"): unknown {
-  const schemas = uniqueSchemas(values)
-  if (schemas.length > 1) return { [keyword]: schemas }
-  return schemas[0]
+function mergeProperties(alternatives: Record<string, unknown>[]): Record<string, unknown> {
+  const branchProperties = alternatives.map(schemaProperties)
+  const names = new Set(branchProperties.flatMap((entry) => Object.keys(entry)))
+  const properties: Record<string, unknown> = {}
+  for (const name of names) {
+    const schemas = uniqueSchemas(branchProperties.map((entry) => entry[name]))
+    properties[name] = schemas.length > 1 ? { anyOf: schemas } : schemas[0]
+  }
+  return properties
 }
 
-function combinePropertyConstraints(unionSchema: unknown, intersectionSchema: unknown): unknown {
-  if (unionSchema && intersectionSchema) return { allOf: [intersectionSchema, unionSchema] }
-  return intersectionSchema ?? unionSchema
-}
-
-function mergeRequired(
-  root: Record<string, unknown>,
-  unionBranches: Record<string, unknown>[],
-  intersectionBranches: Record<string, unknown>[]
-): string[] {
-  const requiredByUnion = unionBranches.map((branch) => new Set(stringArray(branch.required)))
-  const commonRequired = requiredByUnion[0]
-    ? [...requiredByUnion[0]].filter((name) => requiredByUnion.every((fields) => fields.has(name)))
+function mergeRequired(alternatives: Record<string, unknown>[]): string[] {
+  const requiredByBranch = alternatives.map((branch) => new Set(stringArray(branch.required)))
+  const first = requiredByBranch[0]
+  return first
+    ? [...first].filter((name) => requiredByBranch.every((fields) => fields.has(name)))
     : []
-  const requiredByIntersection = intersectionBranches.flatMap((branch) =>
-    stringArray(branch.required)
-  )
-  return [...new Set([...stringArray(root.required), ...commonRequired, ...requiredByIntersection])]
 }
 
 function describeVariants(
   rootDescription: unknown,
-  branches: Record<string, unknown>[]
+  alternatives: Record<string, unknown>[]
 ): string | undefined {
-  const variants = branches.map((branch, index) => {
-    let label = `variant ${index + 1}`
-    if (typeof branch.title === "string") label = branch.title
-    else if (typeof branch.description === "string") label = branch.description
-    const required = stringArray(branch.required)
-    return required.length ? `${label} (requires: ${required.join(", ")})` : label
-  })
+  const variants = alternatives
+    .map((branch, index) => {
+      let label = `variant ${index + 1}`
+      if (typeof branch.title === "string") label = branch.title
+      else if (typeof branch.description === "string") label = branch.description
+      const required = stringArray(branch.required)
+      return required.length ? `${label} (requires: ${required.join(", ")})` : label
+    })
+    .filter((label, index, all) => all.indexOf(label) === index)
   const descriptions = [
     typeof rootDescription === "string" ? rootDescription : undefined,
-    variants.length ? `Choose one input variant: ${variants.join("; ")}.` : undefined,
+    variants.length > 1 ? `Choose one input variant: ${variants.join("; ")}.` : undefined,
   ].filter((part): part is string => Boolean(part))
   return descriptions.length ? descriptions.join(" ") : undefined
-}
-
-function disallowsAdditionalProperties(
-  root: Record<string, unknown>,
-  unionBranches: Record<string, unknown>[],
-  intersectionBranches: Record<string, unknown>[]
-): boolean {
-  return (
-    root.additionalProperties === false ||
-    (unionBranches.length > 0 &&
-      unionBranches.every((branch) => branch.additionalProperties === false)) ||
-    intersectionBranches.some((branch) => branch.additionalProperties === false)
-  )
 }
 
 function uniqueSchemas(values: unknown[]): unknown[] {
