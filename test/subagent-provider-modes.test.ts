@@ -64,6 +64,85 @@ function sseResponse(events: Array<Record<string, unknown> | "[DONE]">): Respons
   return new Response(body, { status: 200, headers: { "Content-Type": "text/event-stream" } })
 }
 
+test("OpenCode Go routes each subagent conversation with a stable session header", async (t) => {
+  const originalFetch = globalThis.fetch
+  t.after(() => {
+    globalThis.fetch = originalFetch
+  })
+  const requests: Array<{ url: string; headers: Headers }> = []
+  globalThis.fetch = async (url, options) => {
+    requests.push({ url: String(url), headers: new Headers(options?.headers) })
+    return new Response(JSON.stringify({ choices: [{ message: { content: "OK" } }] }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" },
+    })
+  }
+  const config = subagentConfigSchema.parse({
+    providers: {
+      go: {
+        type: "openai-compatible",
+        base_url: "https://opencode.ai/inference/go/openai/v1",
+        headers: {
+          "X-OpenCode-Session": "outdated-static-workaround",
+          "User-Agent": "CustomOpenChatX/1.0",
+        },
+      },
+      other: { type: "openai-compatible", base_url: "https://api.example.com/v1" },
+    },
+    models: { go: profile("go"), other: profile("other") },
+  })
+  const go = config.providers.go
+  const other = config.providers.other
+  const goProfile = config.models.go
+  const otherProfile = config.models.other
+  assert.ok(go && other && goProfile && otherProfile)
+  assert.equal(go.type, "openai-compatible")
+  if (go.type !== "openai-compatible") throw new Error("Invalid test provider")
+  const common = { messages: [{ role: "user" as const, content: "OK" }], tools: [] }
+  await generateAgentTurn({
+    ...common,
+    provider: go,
+    providerId: "go",
+    profile: goProfile,
+    sessionId: "ses-first",
+  })
+  await generateAgentTurn({
+    ...common,
+    provider: go,
+    providerId: "go",
+    profile: goProfile,
+    sessionId: "ses-first",
+  })
+  await generateAgentTurn({
+    ...common,
+    provider: go,
+    providerId: "go",
+    profile: goProfile,
+    sessionId: "ses-second",
+  })
+  await generateAgentTurn({
+    ...common,
+    provider: other,
+    providerId: "other",
+    profile: otherProfile,
+    sessionId: "ses-other",
+  })
+  await generateAgentTurn({
+    ...common,
+    provider: { ...go, headers: undefined },
+    providerId: "go",
+    profile: goProfile,
+    sessionId: "ses-third",
+  })
+  assert.deepEqual(
+    requests.map(({ headers }) => headers.get("x-opencode-session")),
+    ["ses-first", "ses-first", "ses-second", null, "ses-third"]
+  )
+  assert.equal(requests[0]?.headers.get("user-agent"), "CustomOpenChatX/1.0")
+  assert.equal(requests[3]?.headers.has("x-opencode-session"), false)
+  assert.equal(requests[4]?.headers.get("user-agent"), "OpenChatX/subagent")
+})
+
 test("Anthropic and Gemini use their native endpoints and API-key headers", async (t) => {
   const requests: Array<{
     path: string

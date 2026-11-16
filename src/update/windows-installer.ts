@@ -7,9 +7,8 @@ import process from "node:process"
 
 import { MCP_CONFIG } from "../config.js"
 import { updateOperationalState } from "../recovery/operational-state.js"
-import type { UpdateCheckResult } from "./version-check.js"
+import { RELEASE_DOWNLOAD_PREFIX, type UpdateCheckResult } from "./version-check.js"
 
-const RELEASE_DOWNLOAD_PREFIX = "https://github.com/XiaoPuOuO/openchatx-mcp/releases/download/"
 const SAFE_SEGMENT = /[^0-9A-Za-z._-]+/gu
 const WINDOWS_INSTALLER_NAME_PATTERN = /^OpenChatX-Setup-(?:x64|arm64)\.exe$/u
 const DECIMAL_PID_PATTERN = /^\d+$/u
@@ -25,6 +24,7 @@ export function buildWindowsUpdaterScript(): string {
 $Installer = $env:OPENCHATX_UPDATE_INSTALLER
 $TargetExe = $env:OPENCHATX_TARGET_APP
 $TargetPid = [int]$env:OPENCHATX_TARGET_PID
+$TargetStartFileTime = [long]$env:OPENCHATX_TARGET_START_FILETIME_UTC
 $BackupDir = $env:OPENCHATX_UPDATE_BACKUP_DIR
 $StatePath = $env:OPENCHATX_OPERATIONAL_STATE_PATH
 $StateBackup = $env:OPENCHATX_OPERATIONAL_STATE_BACKUP
@@ -33,11 +33,112 @@ $HealthUrl = $env:OPENCHATX_UPDATE_HEALTH_URL
 $TargetDir = Split-Path -Parent $TargetExe
 
 function Stop-TargetApp {
-  Get-CimInstance Win32_Process |
-    Where-Object { $_.ExecutablePath -eq $TargetExe } |
-    ForEach-Object {
-      try { Invoke-CimMethod -InputObject $_ -MethodName Terminate | Out-Null } catch {}
+  # Snapshot the process table once, then walk every generation below the known
+  # desktop PID. Direct-child matching alone misses node/browser grandchildren.
+  $processes = @(Get-CimInstance Win32_Process)
+  $processById = @{}
+  $childrenByParent = @{}
+  foreach ($process in $processes) {
+    $processId = [int]$process.ProcessId
+    $processById[$processId] = $process
+    $parentId = [int]$process.ParentProcessId
+    if (-not $childrenByParent.ContainsKey($parentId)) {
+      $childrenByParent[$parentId] = [System.Collections.Generic.List[object]]::new()
     }
+    $childrenByParent[$parentId].Add($process)
+  }
+
+  # Refuse to follow a reused PID into an unrelated process tree.
+  $targetRoot = $processById[$TargetPid]
+  if ($targetRoot) {
+    $actualStartFileTime = $targetRoot.CreationDate.ToFileTimeUtc()
+    if (
+      $targetRoot.ExecutablePath -ne $TargetExe -or
+      [Math]::Abs($actualStartFileTime - $TargetStartFileTime) -gt 1000000
+    ) {
+      throw "Target PID no longer identifies the original OpenChatX process: $TargetPid"
+    }
+  }
+
+  # The detached updater can still appear below the desktop PID in the
+  # process table. Protect this PowerShell process and its own children so the
+  # rollback script never terminates itself.
+  $protectedProcessIds = @{}
+  $protectedQueue = [System.Collections.Generic.Queue[int]]::new()
+  $protectedQueue.Enqueue($PID)
+  while ($protectedQueue.Count -gt 0) {
+    $protectedId = $protectedQueue.Dequeue()
+    if ($protectedProcessIds.ContainsKey($protectedId)) { continue }
+    $protectedProcessIds[$protectedId] = $true
+    foreach ($child in $childrenByParent[$protectedId]) {
+      $protectedQueue.Enqueue([int]$child.ProcessId)
+    }
+  }
+
+  $descendantDepth = @{}
+  $queue = [System.Collections.Generic.Queue[object]]::new()
+  $queue.Enqueue(@{ ProcessId = $TargetPid; Depth = 0 })
+  while ($queue.Count -gt 0) {
+    $entry = $queue.Dequeue()
+    $children = $childrenByParent[[int]$entry.ProcessId]
+    foreach ($child in $children) {
+      $childId = [int]$child.ProcessId
+      if (
+        $childId -eq $TargetPid -or
+        $protectedProcessIds.ContainsKey($childId) -or
+        $descendantDepth.ContainsKey($childId)
+      ) {
+        continue
+      }
+      $depth = [int]$entry.Depth + 1
+      $descendantDepth[$childId] = $depth
+      $queue.Enqueue(@{ ProcessId = $childId; Depth = $depth })
+    }
+  }
+
+  # Stop the desktop root first so it cannot spawn more children, then stop
+  # captured descendants from deepest to shallowest and other app instances.
+  # Do not swallow enumeration/termination failures: rollback must not delete an
+  # install directory while a process can still hold files inside it.
+  if ($processById.ContainsKey($TargetPid)) {
+    Stop-Process -Id $TargetPid -Force -ErrorAction SilentlyContinue
+  }
+  $descendants = @(
+    foreach ($processId in $descendantDepth.Keys) {
+      $processById[[int]$processId]
+    }
+  ) | Sort-Object { $descendantDepth[[int]$_.ProcessId] } -Descending
+  foreach ($process in $descendants) {
+    Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+  $otherAppProcesses = @(
+    $processes | Where-Object {
+      $_.ExecutablePath -eq $TargetExe -and
+      -not $descendantDepth.ContainsKey([int]$_.ProcessId) -and
+      [int]$_.ProcessId -ne $TargetPid
+    }
+  )
+  foreach ($process in $otherAppProcesses) {
+    Stop-Process -Id ([int]$process.ProcessId) -Force -ErrorAction SilentlyContinue
+  }
+
+  $deadline = (Get-Date).AddSeconds(5)
+  do {
+    $remaining = @(
+      Get-CimInstance Win32_Process | Where-Object {
+        $descendantDepth.ContainsKey([int]$_.ProcessId) -or
+        [int]$_.ProcessId -eq $TargetPid -or
+        $_.ExecutablePath -eq $TargetExe
+      }
+    )
+    if ($remaining.Count -eq 0) { break }
+    Start-Sleep -Milliseconds 100
+  } while ((Get-Date) -lt $deadline)
+
+  if ($remaining.Count -gt 0) {
+    $remainingIds = ($remaining | ForEach-Object { $_.ProcessId }) -join ", "
+    throw "Unable to stop OpenChatX process tree: $remainingIds"
+  }
 }
 
 function Restore-PreviousVersion {
@@ -117,11 +218,14 @@ export async function launchWindowsDesktopUpdate(
 
   const targetApp = process.env.OPENCHATX_DESKTOP_APP_PATH?.trim()
   const targetPid = process.env.OPENCHATX_DESKTOP_APP_PID?.trim()
+  const targetStartFileTime = process.env.OPENCHATX_DESKTOP_APP_START_FILETIME_UTC?.trim()
   if (
     !targetApp ||
     basename(targetApp).toLowerCase() !== "openchatx.exe" ||
     !targetPid ||
-    !DECIMAL_PID_PATTERN.test(targetPid)
+    !DECIMAL_PID_PATTERN.test(targetPid) ||
+    !targetStartFileTime ||
+    !DECIMAL_PID_PATTERN.test(targetStartFileTime)
   ) {
     throw new Error("Could not resolve the running OpenChatX Windows desktop app.")
   }
@@ -180,6 +284,7 @@ export async function launchWindowsDesktopUpdate(
         OPENCHATX_UPDATE_INSTALLER: installerPath,
         OPENCHATX_TARGET_APP: targetApp,
         OPENCHATX_TARGET_PID: targetPid,
+        OPENCHATX_TARGET_START_FILETIME_UTC: targetStartFileTime,
         OPENCHATX_UPDATE_BACKUP_DIR: backupDirectory,
         OPENCHATX_OPERATIONAL_STATE_PATH: statePath,
         OPENCHATX_OPERATIONAL_STATE_BACKUP: stateBackup,

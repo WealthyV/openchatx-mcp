@@ -122,6 +122,7 @@ export interface ContextCompactionRequest {
   messages: AgentMessage[]
   profile: SubagentModelProfile
   provider: SubagentProviderConfig
+  sessionId?: string
   apiKey: string | undefined
   signal: AbortSignal
   plan?: Array<{ description: string; status: string }>
@@ -155,6 +156,7 @@ export async function buildCompactedContext(
     provider: input.provider,
     providerId: input.profile.provider,
     profile: compactProfile,
+    sessionId: input.sessionId,
     messages: [
       { role: "system", content: COMPACTION_SYSTEM_PROMPT },
       { role: "user", content: transcript },
