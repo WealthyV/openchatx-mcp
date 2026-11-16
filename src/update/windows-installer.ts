@@ -51,9 +51,7 @@ function Stop-TargetApp {
   # Refuse to follow a reused PID into an unrelated process tree.
   $targetRoot = $processById[$TargetPid]
   if ($targetRoot) {
-    $actualStartFileTime = [System.Management.ManagementDateTimeConverter]::ToDateTime(
-      $targetRoot.CreationDate
-    ).ToFileTimeUtc()
+    $actualStartFileTime = $targetRoot.CreationDate.ToFileTimeUtc()
     if (
       $targetRoot.ExecutablePath -ne $TargetExe -or
       [Math]::Abs($actualStartFileTime - $TargetStartFileTime) -gt 1000000
