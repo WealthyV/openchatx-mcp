@@ -1,4 +1,9 @@
 import { AgentProviderHttpError, parseRetryAfterMs } from "./agent-recovery.js"
+import {
+  beamFreeFunctionParameters,
+  isOpenCodeGoBeamFree,
+  isOpenCodeGoEndpoint,
+} from "./beam-free-compat.js"
 import type { SubagentModelProfile, SubagentProviderConfig } from "./config.js"
 
 export interface AgentFunction {
@@ -52,11 +57,6 @@ const TRAILING_SLASH = /\/$/u
 const GEMINI_MODEL_PREFIX_RE = /^models\//u
 const SSE_DONE_RE = /^data:\s*\[DONE\]\s*$/mu
 const MAX_ERROR_CHARS = 450
-
-function isOpenCodeGoEndpoint(baseUrl: string): boolean {
-  const url = new URL(baseUrl)
-  return url.hostname === "opencode.ai" && url.pathname.startsWith("/inference/go/")
-}
 
 export async function generateAgentTurn(input: AgentGenerateInput): Promise<AgentCompletion> {
   switch (input.provider.type) {
@@ -143,9 +143,21 @@ function parseFunctionCalls(value: unknown): AgentFunctionCall[] {
 
 function applyChatCompletionThinking(
   body: Record<string, unknown>,
-  profile: SubagentModelProfile
+  profile: SubagentModelProfile,
+  omitThinkingParameters = false
 ): void {
   const thinking = profile.thinking
+  if (omitThinkingParameters) {
+    if (thinking.mode === "boolean") delete body[thinking.request_field]
+    if (thinking.mode === "effort") {
+      delete body[thinking.request_field]
+      if (thinking.enabled_field) delete body[thinking.enabled_field]
+    }
+    body.enable_thinking = undefined
+    body.reasoning_effort = undefined
+    body.thinking = undefined
+    return
+  }
   if (thinking.mode === "boolean") body[thinking.request_field] = thinking.default_enabled
   if (thinking.mode === "effort") {
     if (thinking.enabled_field) body[thinking.enabled_field] = thinking.default_enabled
@@ -158,18 +170,27 @@ async function generateChatCompletions(input: AgentGenerateInput): Promise<Agent
   const provider = input.provider
   if (provider.type !== "openai-compatible") throw new Error("Invalid OpenAI-compatible provider.")
   const stream = Boolean(input.onText ?? input.onReasoningSummary)
+  const beamFree = isOpenCodeGoBeamFree(provider, input.profile)
   const body: Record<string, unknown> = {
     model: input.profile.model,
     messages: input.messages.map(openAIMessage),
     ...(input.tools.length
-      ? { tools: input.tools.map((tool) => ({ type: "function", function: tool })) }
+      ? {
+          tools: input.tools.map((tool) => ({
+            type: "function",
+            function: {
+              ...tool,
+              ...(beamFree ? { parameters: beamFreeFunctionParameters(tool.parameters) } : {}),
+            },
+          })),
+        }
       : {}),
     ...(input.profile.temperature === undefined ? {} : { temperature: input.profile.temperature }),
     ...(input.profile.max_output_tokens ? { max_tokens: input.profile.max_output_tokens } : {}),
     ...input.profile.extra_body,
     ...(stream ? { stream: true } : {}),
   }
-  applyChatCompletionThinking(body, input.profile)
+  applyChatCompletionThinking(body, input.profile, beamFree)
   const headers = new Headers({
     "Content-Type": "application/json",
     ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}),
