@@ -17,12 +17,22 @@ test("Windows updater health-checks the new app and rolls back install plus oper
   assert.match(script, /Restore-PreviousVersion/u)
 })
 
-test("Windows updater terminates the target process tree, not just OpenChatX.exe", () => {
+test("Windows updater recursively terminates descendants before rollback", () => {
   const script = buildWindowsUpdaterScript()
 
-  // The known target PID is now used to tear down the process tree so the
-  // Node.js runtime host (node.exe) and child processes are reclaimed.
-  assert.match(script, /\$TargetPid/u)
-  assert.match(script, /ProcessId -eq \$TargetPid/u)
-  assert.match(script, /ParentProcessId -eq \$TargetPid/u)
+  // Walk the process table from the target PID so grandchildren and deeper
+  // browser/helper processes are included, not only direct children.
+  assert.match(script, /\$childrenByParent = @\{\}/u)
+  assert.match(script, /\$queue\.Enqueue\(@\{ ProcessId = \$TargetPid; Depth = 0 \}\)/u)
+  assert.match(script, /\$queue\.Dequeue\(\)/u)
+  assert.match(script, /\$protectedQueue\.Enqueue\(\$PID\)/u)
+  assert.match(script, /\$protectedProcessIds\.ContainsKey\(\$childId\)/u)
+  assert.match(script, /\$childrenByParent\[\[int\]\$entry\.ProcessId\]/u)
+  assert.match(script, /\$queue\.Enqueue\(@\{ ProcessId = \$childId; Depth = \$depth \}\)/u)
+
+  // Terminate deepest descendants before the root and fail closed if any
+  // process from the captured tree or another app instance remains alive.
+  assert.match(script, /Sort-Object \{ \$descendantDepth\[\[int\]\$_.ProcessId\] \} -Descending/u)
+  assert.match(script, /Stop-Process -Id \(\[int\]\$process\.ProcessId\) -Force/u)
+  assert.match(script, /Unable to stop OpenChatX process tree/u)
 })
