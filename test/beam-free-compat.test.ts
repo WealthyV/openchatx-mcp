@@ -88,6 +88,12 @@ test("OpenCode Go Beam Free omits unsupported thinking fields and flattens root 
 
   const unionSchema = {
     description: "Summarize content using one supported format.",
+    properties: {
+      payload: { $ref: "#/$defs/Payload" },
+      legacy: { $ref: "#/definitions/LegacyPayload" },
+    },
+    $defs: { Payload: { type: "string" } },
+    definitions: { LegacyPayload: { type: "number" } },
     allOf: [
       {
         oneOf: [
@@ -163,6 +169,10 @@ test("OpenCode Go Beam Free omits unsupported thinking fields and flattens root 
   assert.ok(properties.mode && typeof properties.mode === "object")
   assert.ok(Array.isArray((properties.mode as Record<string, unknown>).anyOf))
   assert.ok(properties.text && properties.format && properties.agent_id)
+  assert.deepEqual(beamParameters.$defs, { Payload: { type: "string" } })
+  assert.deepEqual(beamParameters.definitions, { LegacyPayload: { type: "number" } })
+  assert.deepEqual(properties.payload, { $ref: "#/$defs/Payload" })
+  assert.deepEqual(properties.legacy, { $ref: "#/definitions/LegacyPayload" })
 
   const deepseekBody = requests[1]
   assert.ok(deepseekBody)

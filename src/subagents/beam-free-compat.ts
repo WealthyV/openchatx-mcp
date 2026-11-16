@@ -27,6 +27,8 @@ export function beamFreeFunctionParameters(
   const properties = mergeProperties(alternatives)
   const required = mergeRequired(alternatives)
   const description = describeVariants(schema.description, alternatives)
+  const definitions = mergeDefinitionMaps(alternatives, "definitions")
+  const defs = mergeDefinitionMaps(alternatives, "$defs")
   return {
     type: "object",
     properties,
@@ -35,6 +37,8 @@ export function beamFreeFunctionParameters(
     alternatives.every((branch) => branch.additionalProperties === false)
       ? { additionalProperties: false }
       : {}),
+    ...(definitions ? { definitions } : {}),
+    ...(defs ? { $defs: defs } : {}),
     ...(description ? { description } : {}),
   }
 }
@@ -76,7 +80,22 @@ function intersectSchemas(
       : {}),
     ...(description ? { description } : {}),
     ...(typeof left.title === "string" ? { title: left.title } : {}),
+    ...(mergeDefinitionMaps([left, right], "definitions")
+      ? { definitions: mergeDefinitionMaps([left, right], "definitions") }
+      : {}),
+    ...(mergeDefinitionMaps([left, right], "$defs")
+      ? { $defs: mergeDefinitionMaps([left, right], "$defs") }
+      : {}),
   }
+}
+
+function mergeDefinitionMaps(
+  schemas: Record<string, unknown>[],
+  key: "definitions" | "$defs"
+): Record<string, unknown> | undefined {
+  const maps = schemas.map((schema) => schema[key]).filter(isRecord)
+  if (!maps.length) return undefined
+  return Object.assign({}, ...maps)
 }
 
 function schemaBranches(value: unknown): Record<string, unknown>[] {
