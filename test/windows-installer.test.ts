@@ -23,6 +23,7 @@ test("Windows updater recursively terminates descendants before rollback", () =>
   // Walk the process table from the target PID so grandchildren and deeper
   // browser/helper processes are included, not only direct children.
   assert.match(script, /\$childrenByParent = @\{\}/u)
+  assert.match(script, /\$targetRoot\.ExecutablePath -ne \$TargetExe/u)
   assert.match(script, /\$queue\.Enqueue\(@\{ ProcessId = \$TargetPid; Depth = 0 \}\)/u)
   assert.match(script, /\$queue\.Dequeue\(\)/u)
   assert.match(script, /\$protectedQueue\.Enqueue\(\$PID\)/u)

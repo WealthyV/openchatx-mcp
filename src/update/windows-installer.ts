@@ -47,6 +47,12 @@ function Stop-TargetApp {
     $childrenByParent[$parentId].Add($process)
   }
 
+  # Refuse to follow a reused PID into an unrelated process tree.
+  $targetRoot = $processById[$TargetPid]
+  if ($targetRoot -and $targetRoot.ExecutablePath -ne $TargetExe) {
+    throw "Target PID no longer belongs to OpenChatX: $TargetPid"
+  }
+
   # The detached updater can still appear below the desktop PID in the
   # process table. Protect this PowerShell process and its own children so the
   # rollback script never terminates itself.
