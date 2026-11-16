@@ -4,6 +4,7 @@ import { getAgentIdentity } from "../agent/context.js"
 import type { AgentObserver } from "../agent/observer.js"
 import type { McpServerFactory } from "../mcp/server-factory.js"
 import type { RuntimeControlService } from "../runtime/runtime-control.js"
+import { redactText } from "../security/redact.js"
 import {
   buildCompactedContext,
   contextCompactionDue,
@@ -1315,12 +1316,20 @@ export function safeToolArguments(args: Record<string, unknown>): string {
         ])
       )
     }
-    if (typeof value === "string" && (value.startsWith("{") || value.startsWith("["))) {
-      try {
-        return JSON.stringify(scrub(JSON.parse(value), depth + 1))
-      } catch {
-        return value
+    if (typeof value === "string") {
+      // Redact secrets embedded in string values (e.g. a key passed under a
+      // non-sensitive field name such as "data", "query", or "url"), not only
+      // when the field name itself is sensitive. This keeps the preview path
+      // consistent with the timeline path (src/security/redact.ts).
+      const redacted = redactText(value)
+      if (redacted.startsWith("{") || redacted.startsWith("[")) {
+        try {
+          return JSON.stringify(scrub(JSON.parse(redacted), depth + 1))
+        } catch {
+          return redacted
+        }
       }
+      return redacted
     }
     return value
   }
