@@ -14,11 +14,11 @@ test("safeToolArguments redacts secret values under non-sensitive field names", 
   assert.equal(safeToolArguments({ data: SECRET }), JSON.stringify({ data: "[REDACTED]" }))
   assert.equal(
     safeToolArguments({ query: `token=${SECRET}` }),
-    JSON.stringify({ query: `token=[REDACTED]` })
+    JSON.stringify({ query: "token=[REDACTED]" })
   )
   assert.equal(
     safeToolArguments({ url: `https://api.example.com/v1?api_key=${SECRET}` }),
-    JSON.stringify({ url: `https://api.example.com/v1?api_key=[REDACTED]` })
+    JSON.stringify({ url: "https://api.example.com/v1?api_key=[REDACTED]" })
   )
 })
 
@@ -31,7 +31,7 @@ test("safeToolArguments still redacts by sensitive field name", () => {
 
 test("safeToolArguments redacts secrets nested in JSON-string values", () => {
   const out = JSON.parse(safeToolArguments({ payload: JSON.stringify({ token: SECRET }) }))
-  assert.equal(out.payload.token, "[redacted]")
+  assert.equal(JSON.parse(out.payload).token, "[redacted]")
 })
 
 test("safeToolArguments does not mangle ordinary non-secret values", () => {

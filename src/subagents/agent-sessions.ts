@@ -1,11 +1,10 @@
 import { randomUUID } from "node:crypto"
 
-import { redactText } from "../security/redact.js"
-
 import { getAgentIdentity } from "../agent/context.js"
 import type { AgentObserver } from "../agent/observer.js"
 import type { McpServerFactory } from "../mcp/server-factory.js"
 import type { RuntimeControlService } from "../runtime/runtime-control.js"
+import { redactText } from "../security/redact.js"
 import {
   buildCompactedContext,
   contextCompactionDue,
