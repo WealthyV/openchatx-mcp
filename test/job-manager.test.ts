@@ -2,6 +2,7 @@ import assert from "node:assert/strict"
 import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
+import process from "node:process"
 import test from "node:test"
 
 import { JobManager } from "../src/jobs/job-manager.js"
@@ -146,4 +147,32 @@ test("concurrent JobManager instances use distinct atomic temp files", async (t)
     (await readdir(root)).some((name) => name.startsWith(".jobs.json.") && name.endsWith(".tmp")),
     false
   )
+})
+
+test("kill timer does not emit an unhandled rejection when persistence fails", {
+  timeout: 10000,
+}, async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-job-timeout-rejection-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const manager = new JobManager(root, join(root, "jobs.json"))
+
+  const unhandled: unknown[] = []
+  const onUnhandled = (reason: unknown) => unhandled.push(reason)
+  process.on("unhandledRejection", onUnhandled)
+  t.after(() => process.off("unhandledRejection", onUnhandled))
+
+  await manager.initialize()
+  // A short hard deadline guarantees the kill-timer path (scheduleKill) runs.
+  const started = await manager.start("timeout-rejection", "sleep 5", undefined, undefined, 30)
+  assert.equal(started.status, "running")
+
+  // Make persist() fail; the timer path must attach a catch handler.
+  const mutable = manager as unknown as { persist: () => Promise<void> }
+  mutable.persist = () => Promise.reject(new Error("simulated write failure"))
+
+  // Wait past the kill window so the timer fires and calls persist().
+  await new Promise((resolve) => setTimeout(resolve, 250))
+
+  assert.equal(unhandled.length, 0, `unexpected unhandled rejection: ${String(unhandled[0])}`)
+  await manager.close().catch(() => undefined)
 })
