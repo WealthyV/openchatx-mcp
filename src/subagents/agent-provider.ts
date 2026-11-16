@@ -38,6 +38,8 @@ export interface AgentGenerateInput {
   provider: SubagentProviderConfig
   providerId: string
   profile: SubagentModelProfile
+  /** Stable identifier for a persisted subagent conversation, including retries. */
+  sessionId?: string
   messages: AgentMessage[]
   tools: AgentFunction[]
   apiKey?: string
@@ -50,6 +52,11 @@ const TRAILING_SLASH = /\/$/u
 const GEMINI_MODEL_PREFIX_RE = /^models\//u
 const SSE_DONE_RE = /^data:\s*\[DONE\]\s*$/mu
 const MAX_ERROR_CHARS = 450
+
+function isOpenCodeGoEndpoint(baseUrl: string): boolean {
+  const url = new URL(baseUrl)
+  return url.hostname === "opencode.ai" && url.pathname.startsWith("/inference/go/")
+}
 
 export async function generateAgentTurn(input: AgentGenerateInput): Promise<AgentCompletion> {
   switch (input.provider.type) {
@@ -163,15 +170,21 @@ async function generateChatCompletions(input: AgentGenerateInput): Promise<Agent
     ...(stream ? { stream: true } : {}),
   }
   applyChatCompletionThinking(body, input.profile)
+  const headers = new Headers({
+    "Content-Type": "application/json",
+    ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}),
+    ...provider.headers,
+  })
+  if (isOpenCodeGoEndpoint(provider.base_url)) {
+    // Go requires a stable ID for routing/caching; do not share one across subagents.
+    if (input.sessionId) headers.set("x-opencode-session", input.sessionId)
+    if (!headers.has("User-Agent")) headers.set("User-Agent", "OpenChatX/subagent")
+  }
   const response = await fetch(
     `${provider.base_url.replace(TRAILING_SLASH, "")}/chat/completions`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        ...(input.apiKey ? { Authorization: `Bearer ${input.apiKey}` } : {}),
-        ...provider.headers,
-      },
+      headers,
       body: JSON.stringify(body),
       signal: input.signal,
     }
