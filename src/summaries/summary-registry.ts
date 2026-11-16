@@ -97,13 +97,20 @@ export class SummaryRegistry {
   }
 
   private async load(): Promise<void> {
+    let raw: string
     try {
-      const state = stateSchema.parse(JSON.parse(await readFile(this.statePath, "utf8")))
-      for (const summary of state.summaries) this.summaries.set(summary.uuid, summary)
+      raw = await readFile(this.statePath, "utf8")
     } catch (error) {
       if (isEnoent(error)) return
-      // A truncated or invalid state file must not brick the registry forever.
-      // Quarantine it and continue with an empty state, matching job-manager.
+      // A transient read failure (EIO, EACCES, ...) must not be treated as
+      // corruption: leave the file untouched so valid state is not hidden.
+      throw error
+    }
+    try {
+      const state = stateSchema.parse(JSON.parse(raw))
+      for (const summary of state.summaries) this.summaries.set(summary.uuid, summary)
+    } catch (error) {
+      // Only malformed/truncated content is quarantined.
       await this.quarantineCorruptState(error)
     }
   }

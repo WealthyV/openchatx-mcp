@@ -92,12 +92,20 @@ export class TimelineRegistry {
   }
 
   private async load(): Promise<void> {
+    let raw: string
     try {
-      const value: unknown = JSON.parse(await readFile(this.path, "utf8"))
-      this.events = stateSchema.parse(value).events
+      raw = await readFile(this.path, "utf8")
     } catch (error) {
       if (isEnoent(error)) return
-      // A truncated or invalid state file must not brick the registry forever.
+      // A transient read failure (EIO, EACCES, ...) must not be treated as
+      // corruption: leave the file untouched so valid state is not hidden.
+      throw error
+    }
+    try {
+      const value: unknown = JSON.parse(raw)
+      this.events = stateSchema.parse(value).events
+    } catch (error) {
+      // Only malformed/truncated content is quarantined.
       await this.quarantineCorruptState(error)
     }
   }

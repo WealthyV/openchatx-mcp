@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -45,6 +45,25 @@ for (const [label, contents] of [
     assert.equal((await registry.list()).length, 1)
   })
 }
+
+test("timeline registry does not quarantine a valid file on a transient read error", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-timeline-read-error-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  // A directory as the state path makes readFile fail with EISDIR (a non-ENOENT
+  // I/O error) while no parsing is involved. It must be rethrown, not treated
+  // as corrupt state that gets moved aside and replaced with an empty registry.
+  const statePath = join(root, "timeline.json")
+  await mkdir(statePath)
+
+  const registry = new TimelineRegistry(statePath)
+  await assert.rejects(() => registry.list(), { code: "EISDIR" })
+
+  assert.equal(
+    (await readdir(root)).some((name) => name.startsWith("timeline.json.corrupt-")),
+    false,
+    "a successful read is required before quarantining as corrupt"
+  )
+})
 
 test("timeline registry persists atomically without leaving temp files", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "openchatx-timeline-atomic-"))
