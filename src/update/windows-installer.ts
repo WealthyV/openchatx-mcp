@@ -24,6 +24,7 @@ export function buildWindowsUpdaterScript(): string {
 $Installer = $env:OPENCHATX_UPDATE_INSTALLER
 $TargetExe = $env:OPENCHATX_TARGET_APP
 $TargetPid = [int]$env:OPENCHATX_TARGET_PID
+$TargetStartFileTime = [long]$env:OPENCHATX_TARGET_START_FILETIME_UTC
 $BackupDir = $env:OPENCHATX_UPDATE_BACKUP_DIR
 $StatePath = $env:OPENCHATX_OPERATIONAL_STATE_PATH
 $StateBackup = $env:OPENCHATX_OPERATIONAL_STATE_BACKUP
@@ -49,8 +50,16 @@ function Stop-TargetApp {
 
   # Refuse to follow a reused PID into an unrelated process tree.
   $targetRoot = $processById[$TargetPid]
-  if ($targetRoot -and $targetRoot.ExecutablePath -ne $TargetExe) {
-    throw "Target PID no longer belongs to OpenChatX: $TargetPid"
+  if ($targetRoot) {
+    $actualStartFileTime = [System.Management.ManagementDateTimeConverter]::ToDateTime(
+      $targetRoot.CreationDate
+    ).ToFileTimeUtc()
+    if (
+      $targetRoot.ExecutablePath -ne $TargetExe -or
+      [Math]::Abs($actualStartFileTime - $TargetStartFileTime) -gt 1000000
+    ) {
+      throw "Target PID no longer identifies the original OpenChatX process: $TargetPid"
+    }
   }
 
   # The detached updater can still appear below the desktop PID in the
@@ -211,11 +220,14 @@ export async function launchWindowsDesktopUpdate(
 
   const targetApp = process.env.OPENCHATX_DESKTOP_APP_PATH?.trim()
   const targetPid = process.env.OPENCHATX_DESKTOP_APP_PID?.trim()
+  const targetStartFileTime = process.env.OPENCHATX_DESKTOP_APP_START_FILETIME_UTC?.trim()
   if (
     !targetApp ||
     basename(targetApp).toLowerCase() !== "openchatx.exe" ||
     !targetPid ||
-    !DECIMAL_PID_PATTERN.test(targetPid)
+    !DECIMAL_PID_PATTERN.test(targetPid) ||
+    !targetStartFileTime ||
+    !DECIMAL_PID_PATTERN.test(targetStartFileTime)
   ) {
     throw new Error("Could not resolve the running OpenChatX Windows desktop app.")
   }
@@ -274,6 +286,7 @@ export async function launchWindowsDesktopUpdate(
         OPENCHATX_UPDATE_INSTALLER: installerPath,
         OPENCHATX_TARGET_APP: targetApp,
         OPENCHATX_TARGET_PID: targetPid,
+        OPENCHATX_TARGET_START_FILETIME_UTC: targetStartFileTime,
         OPENCHATX_UPDATE_BACKUP_DIR: backupDirectory,
         OPENCHATX_OPERATIONAL_STATE_PATH: statePath,
         OPENCHATX_OPERATIONAL_STATE_BACKUP: stateBackup,
