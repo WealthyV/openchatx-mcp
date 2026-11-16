@@ -77,9 +77,12 @@ const stateSchema = z.object({
 })
 export type OperationalState = z.infer<typeof stateSchema>
 
-const statePath = join(MCP_CONFIG.stateDir, "operational-state.json")
+function stateFilePath(): string {
+  return join(MCP_CONFIG.stateDir, "operational-state.json")
+}
 
 export async function loadOperationalState(): Promise<OperationalState> {
+  const statePath = stateFilePath()
   try {
     const raw: unknown = JSON.parse(await readFile(statePath, "utf8"))
     return migrateOperationalState(raw)
@@ -97,6 +100,7 @@ export async function loadOperationalState(): Promise<OperationalState> {
 }
 
 export async function saveOperationalState(state: OperationalState): Promise<OperationalState> {
+  const statePath = stateFilePath()
   const validated = stateSchema.parse(state)
   await mkdir(dirname(statePath), { recursive: true, mode: 0o700 })
   const temporary = `${statePath}.tmp-${process.pid}-${Date.now()}`
@@ -105,7 +109,27 @@ export async function saveOperationalState(state: OperationalState): Promise<Ope
   return validated
 }
 
+// Serialize state mutations so concurrent callers cannot clobber each other
+// through a load-modify-save race. Without coordination, two overlapping
+// updates each read the same starting state and the second save overwrites the
+// first, silently dropping one of the changes.
+let stateMutationChain: Promise<unknown> = Promise.resolve()
+
 export async function updateOperationalState(
+  update: (state: OperationalState) => OperationalState | undefined
+): Promise<OperationalState> {
+  const run = () => mutateOperationalState(update)
+  const result = stateMutationChain.then(run, run)
+  // Keep the chain alive even if a mutation rejects, but let the rejection
+  // propagate to the caller of this specific update.
+  stateMutationChain = result.then(
+    () => undefined,
+    () => undefined
+  )
+  return result
+}
+
+async function mutateOperationalState(
   update: (state: OperationalState) => OperationalState | undefined
 ): Promise<OperationalState> {
   const state = await loadOperationalState()

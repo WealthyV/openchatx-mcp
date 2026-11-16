@@ -1,7 +1,15 @@
 import assert from "node:assert/strict"
+import { mkdtemp } from "node:fs/promises"
+import { tmpdir } from "node:os"
+import { join } from "node:path"
 import test from "node:test"
 
-import { migrateOperationalState } from "../src/recovery/operational-state.js"
+import { MCP_CONFIG } from "../src/config.js"
+import {
+  loadOperationalState,
+  migrateOperationalState,
+  updateOperationalState,
+} from "../src/recovery/operational-state.js"
 import { redactSecrets, redactText } from "../src/security/redact.js"
 import { buildMacOSUpdaterScript } from "../src/update/macos-installer.js"
 
@@ -69,4 +77,25 @@ test("macOS updater keeps the old app until post-update health succeeds and roll
   assert.match(script, /new app did not become healthy/iu)
   assert.match(script, /mv "\$BACKUP_APP" "\$TARGET_APP"/u)
   assert.match(script, /open "\$TARGET_APP"/u)
+})
+
+test("operational state concurrent updates serialize without lost writes", async () => {
+  const tmp = await mkdtemp(join(tmpdir(), "openchatx-state-"))
+  const originalStateDir = MCP_CONFIG.stateDir
+  MCP_CONFIG.stateDir = tmp
+  try {
+    const updates = Array.from({ length: 20 }, (_, i) =>
+      updateOperationalState((state) => {
+        state.capabilityPermissions[`concurrent-${i}`] = { tool: "allow" }
+        return state
+      })
+    )
+    await Promise.all(updates)
+    const finalState = await loadOperationalState()
+    for (let i = 0; i < 20; i++) {
+      assert.equal(finalState.capabilityPermissions[`concurrent-${i}`]?.tool, "allow")
+    }
+  } finally {
+    MCP_CONFIG.stateDir = originalStateDir
+  }
 })
