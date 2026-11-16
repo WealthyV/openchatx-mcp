@@ -1143,6 +1143,10 @@ internal sealed class RuntimeSupervisor
         environment["OPENCHATX_DESKTOP"] = "1";
         environment["OPENCHATX_DESKTOP_APP_PATH"] = Environment.ProcessPath;
         environment["OPENCHATX_DESKTOP_APP_PID"] = Environment.ProcessId.ToString();
+        using var currentProcess = Process.GetCurrentProcess();
+        environment["OPENCHATX_DESKTOP_APP_START_FILETIME_UTC"] =
+            currentProcess.StartTime.ToUniversalTime().ToFileTimeUtc()
+                .ToString(System.Globalization.CultureInfo.InvariantCulture);
 
         if (includeTunnelKey)
         {
