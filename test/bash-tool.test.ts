@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
-import { access, mkdir, writeFile } from "node:fs/promises"
+import { access, mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import process from "node:process"
 import test from "node:test"
 
 import { Client } from "@modelcontextprotocol/client"
@@ -290,6 +291,97 @@ test("dashboard-style forced stop cancels the durable bash job and returns queue
   const durableJobs = await jobs.list()
   assert.equal(durableJobs.length, 1)
   assert.equal(durableJobs[0]?.status, "cancelled")
+})
+
+test("legacy foreground command that ignores SIGTERM is reclaimed via SIGKILL escalation", {
+  timeout: 10_000,
+}, async (t) => {
+  if (process.platform === "win32") return
+  const cwd = await tempDir(t, "openchatx-bash-sigkill-")
+  const pidFile = join(cwd, "child.pid")
+
+  const server = new McpServer({ name: "bash-sigkill-test", version: "1.0.0" })
+  const client = new Client({ name: "bash-sigkill-client", version: "1.0.0" })
+  registerBashTool(server)
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  t.after(() => Promise.all([client.close(), server.close()]))
+
+  // A command that traps (ignores) SIGTERM and keeps running. Without SIGKILL
+  // escalation, the foreground runner would hang forever waiting for it to exit.
+  const result = await client.callTool({
+    name: "bash",
+    arguments: {
+      command: `echo $$ > "${pidFile}"; trap '' TERM; while true; do sleep 0.2; done`,
+      workdir: cwd,
+      timeout_ms: 300,
+    },
+  })
+  assert.equal(result.isError, undefined)
+  const out = result.structuredContent as { timed_out?: boolean }
+  assert.equal(out.timed_out, true)
+
+  // Wait past the SIGTERM -> grace -> SIGKILL window.
+  await new Promise((resolve) => setTimeout(resolve, 3000))
+
+  const pid = Number((await readFile(pidFile, "utf8").catch(() => "0")).trim())
+  assert.ok(pid > 0, "child pid should have been captured")
+  let alive = false
+  try {
+    process.kill(pid, 0)
+    alive = true
+  } catch {
+    alive = false
+  }
+  assert.equal(alive, false, "stubborn child should have been SIGKILLed after the grace window")
+})
+
+test("SIGKILL escalation gives surviving process-group members the full grace window", {
+  timeout: 15_000,
+}, async (t) => {
+  if (process.platform === "win32") return
+  const cwd = await tempDir(t, "openchatx-bash-grace-")
+  const heartbeat = join(cwd, "heartbeat.log")
+
+  const server = new McpServer({ name: "bash-grace-test", version: "1.0.0" })
+  const client = new Client({ name: "bash-grace-client", version: "1.0.0" })
+  registerBashTool(server)
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+  t.after(() => Promise.all([client.close(), server.close()]))
+
+  // The shell dies on SIGTERM, but a descendant in the same process group
+  // ignores SIGTERM and keeps ticking. It must not be SIGKILLed the moment the
+  // shell exits: it gets the full grace window and is reclaimed afterwards.
+  const command = [
+    `( trap '' TERM; while true; do echo tick >> "${heartbeat}"; sleep 0.2; done ) >/dev/null 2>&1 &`,
+    "while true; do sleep 0.2; done",
+  ].join("; ")
+  const result = await client.callTool({
+    name: "bash",
+    arguments: { command, workdir: cwd, timeout_ms: 300 },
+  })
+  assert.equal(result.isError, undefined)
+  assert.equal((result.structuredContent as { timed_out?: boolean }).timed_out, true)
+
+  const lines = async () => {
+    const content = await readFile(heartbeat, "utf8").catch(() => "")
+    return content ? content.trim().split("\n").length : 0
+  }
+  const initial = await lines()
+  await new Promise((resolve) => setTimeout(resolve, 1000))
+  const duringGrace = await lines()
+  assert.ok(
+    duringGrace > initial,
+    "descendant should stay alive during the grace window instead of being killed with the shell"
+  )
+
+  // After the 2s grace the group is force-killed, so the ticks stop.
+  await new Promise((resolve) => setTimeout(resolve, 2200))
+  const afterGrace = await lines()
+  await new Promise((resolve) => setTimeout(resolve, 600))
+  const finalLines = await lines()
+  assert.equal(finalLines, afterGrace, "descendant should be reclaimed after the grace window")
 })
 
 async function waitForJobOutput(jobs: JobManager, pattern: RegExp): Promise<void> {
