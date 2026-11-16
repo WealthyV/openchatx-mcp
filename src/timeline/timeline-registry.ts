@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
+import process from "node:process"
 
 import { z } from "zod"
 
@@ -95,8 +96,27 @@ export class TimelineRegistry {
       const value: unknown = JSON.parse(await readFile(this.path, "utf8"))
       this.events = stateSchema.parse(value).events
     } catch (error) {
-      if (!isEnoent(error)) throw error
+      if (isEnoent(error)) return
+      // A truncated or invalid state file must not brick the registry forever.
+      await this.quarantineCorruptState(error)
     }
+  }
+
+  private async quarantineCorruptState(error: unknown): Promise<void> {
+    const quarantinePath = `${this.path}.corrupt-${Date.now()}`
+    try {
+      await rename(this.path, quarantinePath)
+      console.warn(
+        `OpenChatX timeline state was invalid (${describeError(error)}) and has been quarantined to ${JSON.stringify(quarantinePath)}. Starting with an empty timeline.`
+      )
+    } catch (quarantineError) {
+      if (!isEnoent(quarantineError)) {
+        console.warn(
+          `OpenChatX timeline state was invalid (${describeError(error)}) and could not be quarantined (${describeError(quarantineError)}). Starting with an empty timeline.`
+        )
+      }
+    }
+    this.events = []
   }
 
   private async persist(): Promise<void> {
@@ -105,10 +125,25 @@ export class TimelineRegistry {
       .catch(() => undefined)
       .then(async () => {
         await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
-        await writeFile(this.path, serialized, { mode: 0o600 })
+        await this.writeStateAtomically(serialized)
       })
     this.persistChain = pending
     await pending
+  }
+
+  private async writeStateAtomically(serialized: string): Promise<void> {
+    const directory = dirname(this.path)
+    const tempPath = join(
+      directory,
+      `.${basename(this.path)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+    )
+    try {
+      await writeFile(tempPath, serialized, { encoding: "utf8", mode: 0o600 })
+      await rename(tempPath, this.path)
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 }
 
@@ -116,4 +151,8 @@ export const timelineRegistry = new TimelineRegistry()
 
 function isEnoent(error: unknown): boolean {
   return error instanceof Error && "code" in error && error.code === "ENOENT"
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }

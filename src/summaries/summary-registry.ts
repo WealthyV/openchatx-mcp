@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises"
+import { basename, dirname, join } from "node:path"
+import process from "node:process"
 
 import { z } from "zod"
 
@@ -23,6 +24,7 @@ export type TemporarySummary = z.infer<typeof summarySchema>
 export class SummaryRegistry {
   private readonly summaries = new Map<string, TemporarySummary>()
   private loadPromise?: Promise<void>
+  private persistChain: Promise<void> = Promise.resolve()
 
   constructor(private readonly statePath = join(MCP_CONFIG.stateDir, "summaries.json")) {}
 
@@ -99,18 +101,64 @@ export class SummaryRegistry {
       const state = stateSchema.parse(JSON.parse(await readFile(this.statePath, "utf8")))
       for (const summary of state.summaries) this.summaries.set(summary.uuid, summary)
     } catch (error) {
-      if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
+      if (isEnoent(error)) return
+      // A truncated or invalid state file must not brick the registry forever.
+      // Quarantine it and continue with an empty state, matching job-manager.
+      await this.quarantineCorruptState(error)
     }
   }
 
-  private async persist(): Promise<void> {
-    await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    await writeFile(
-      this.statePath,
-      `${JSON.stringify({ summaries: [...this.summaries.values()] }, null, 2)}\n`,
-      { encoding: "utf8", mode: 0o600 }
-    )
+  private async quarantineCorruptState(error: unknown): Promise<void> {
+    const quarantinePath = `${this.statePath}.corrupt-${Date.now()}`
+    try {
+      await rename(this.statePath, quarantinePath)
+      console.warn(
+        `OpenChatX summary state was invalid (${describeError(error)}) and has been quarantined to ${JSON.stringify(quarantinePath)}. Starting with an empty summary state.`
+      )
+    } catch (quarantineError) {
+      if (!isEnoent(quarantineError)) {
+        console.warn(
+          `OpenChatX summary state was invalid (${describeError(error)}) and could not be quarantined (${describeError(quarantineError)}). Starting with an empty summary state.`
+        )
+      }
+    }
+    this.summaries.clear()
   }
+
+  private async persist(): Promise<void> {
+    const serialized = `${JSON.stringify({ summaries: [...this.summaries.values()] }, null, 2)}\n`
+    const pending = this.persistChain
+      .catch(() => undefined)
+      .then(async () => {
+        await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 })
+        await this.writeStateAtomically(serialized)
+      })
+    this.persistChain = pending
+    await pending
+  }
+
+  private async writeStateAtomically(serialized: string): Promise<void> {
+    const directory = dirname(this.statePath)
+    const tempPath = join(
+      directory,
+      `.${basename(this.statePath)}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+    )
+    try {
+      await writeFile(tempPath, serialized, { encoding: "utf8", mode: 0o600 })
+      await rename(tempPath, this.statePath)
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined)
+      throw error
+    }
+  }
+}
+
+function isEnoent(error: unknown): boolean {
+  return error instanceof Error && "code" in error && error.code === "ENOENT"
+}
+
+function describeError(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function normalizeContent(content: string): string {
