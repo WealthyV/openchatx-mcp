@@ -1,5 +1,5 @@
 import assert from "node:assert/strict"
-import { mkdtemp, rm, writeFile } from "node:fs/promises"
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { join } from "node:path"
 import test from "node:test"
@@ -74,4 +74,63 @@ test("summary registry manually removes summaries", async (t) => {
   const created = await registry.create("delete me")
   await registry.remove(created.uuid)
   assert.deepEqual(await registry.list(), [])
+})
+
+for (const [label, contents] of [
+  ["truncated", '{"summaries":['],
+  ["schema-invalid", '{"summaries":[{"uuid":42}]}'],
+] as const) {
+  test(`summary registry quarantines ${label} state and continues empty`, async (t) => {
+    const root = await mkdtemp(join(tmpdir(), `openchatx-summaries-corrupt-${label}-`))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const statePath = join(root, "summaries.json")
+    await writeFile(statePath, contents, "utf8")
+
+    const registry = new SummaryRegistry(statePath)
+    assert.deepEqual(await registry.list(), [])
+
+    const quarantined = (await readdir(root)).filter((name) =>
+      name.startsWith("summaries.json.corrupt-")
+    )
+    assert.equal(quarantined.length, 1)
+    assert.equal(await readFile(join(root, quarantined[0] ?? ""), "utf8"), contents)
+
+    await registry.create("after quarantine")
+    assert.equal((await registry.list()).length, 1)
+  })
+}
+
+test("summary registry does not quarantine a valid file on a transient read error", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-summaries-read-error-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  // A directory as the state path makes readFile fail with EISDIR (a non-ENOENT
+  // I/O error) while no parsing is involved. It must be rethrown, not treated
+  // as corrupt state that gets moved aside and replaced with an empty registry.
+  const statePath = join(root, "summaries.json")
+  await mkdir(statePath)
+
+  const registry = new SummaryRegistry(statePath)
+  await assert.rejects(() => registry.list(), { code: "EISDIR" })
+
+  assert.equal(
+    (await readdir(root)).some((name) => name.startsWith("summaries.json.corrupt-")),
+    false,
+    "a successful read is required before quarantining as corrupt"
+  )
+})
+
+test("summary registry persists atomically without leaving temp files", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-summaries-atomic-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const statePath = join(root, "summaries.json")
+  const registry = new SummaryRegistry(statePath)
+
+  await registry.create("atomic")
+  assert.deepEqual(JSON.parse(await readFile(statePath, "utf8")).summaries.length, 1)
+  assert.equal(
+    (await readdir(root)).some(
+      (name) => name.startsWith(".summaries.json.") && name.endsWith(".tmp")
+    ),
+    false
+  )
 })

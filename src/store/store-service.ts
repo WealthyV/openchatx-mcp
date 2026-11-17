@@ -190,6 +190,7 @@ interface ReviewScanResult {
 export class CapabilityStoreService {
   private readonly statePath: string
   private readonly stagingRoot: string
+  private stateChain: Promise<void> = Promise.resolve()
 
   constructor(
     private readonly catalogPath: string,
@@ -461,11 +462,17 @@ export class CapabilityStoreService {
   }
 
   async install(id: string, revision?: string): Promise<StoreEntry> {
-    if (id.startsWith("github:")) return this.installCommunity(id, revision)
-    return this.installBuiltin(id)
+    return this.withStateLock(async (): Promise<StoreEntry> => {
+      if (id.startsWith("github:")) return this.installCommunity(id, revision)
+      return this.installBuiltin(id)
+    })
   }
 
   async uninstall(id: string): Promise<void> {
+    return this.withStateLock(() => this.uninstallLocked(id))
+  }
+
+  private async uninstallLocked(id: string): Promise<void> {
     const state = await this.loadState()
     const installed = state.installed[id]
     if (!installed) throw new Error(`Capability ${JSON.stringify(id)} is not installed.`)
@@ -722,12 +729,36 @@ export class CapabilityStoreService {
     }
   }
 
+  /**
+   * Serializes load-modify-save cycles so concurrent installs/uninstalls cannot
+   * each read the same state and have the later save silently drop the earlier
+   * change. Mirrors the mutex used by updateOperationalState.
+   */
+  private withStateLock<T>(operation: () => Promise<T>): Promise<T> {
+    const result = this.stateChain.then(operation, operation)
+    this.stateChain = result.then(
+      () => undefined,
+      () => undefined
+    )
+    return result
+  }
+
   private async saveState(state: StoreState): Promise<void> {
     await mkdir(dirname(this.statePath), { recursive: true, mode: 0o700 })
-    await writeFile(this.statePath, `${JSON.stringify(state, null, 2)}\n`, {
-      encoding: "utf8",
-      mode: 0o600,
-    })
+    const tempPath = join(
+      dirname(this.statePath),
+      `.${basename(this.statePath)}.${process.pid}.${Date.now()}.tmp`
+    )
+    try {
+      await writeFile(tempPath, `${JSON.stringify(state, null, 2)}\n`, {
+        encoding: "utf8",
+        mode: 0o600,
+      })
+      await rename(tempPath, this.statePath)
+    } catch (error) {
+      await rm(tempPath, { force: true }).catch(() => undefined)
+      throw error
+    }
   }
 
   private bundlePath(bundle: string): string {

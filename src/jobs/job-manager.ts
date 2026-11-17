@@ -334,7 +334,9 @@ export class JobManager {
     const delayMs = new Date(job.killAfterAt).getTime() - Date.now()
     if (delayMs <= 0) {
       this.timeoutJob(job)
-      void this.persist()
+      void this.persist().catch((error) => {
+        console.warn(`Failed to persist timed-out durable job ${job.id}: ${describeError(error)}`)
+      })
       return
     }
     const timer = setTimeout(() => {
@@ -342,7 +344,11 @@ export class JobManager {
       const current = this.jobs.get(job.id)
       if (current?.status !== "running") return
       this.timeoutJob(current)
-      void this.persist()
+      void this.persist().catch((error) => {
+        console.warn(
+          `Failed to persist timed-out durable job ${current.id}: ${describeError(error)}`
+        )
+      })
     }, delayMs)
     timer.unref()
     this.killTimers.set(job.id, timer)
