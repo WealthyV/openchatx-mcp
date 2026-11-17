@@ -9,7 +9,7 @@ OpenChatX provides an **optional, disabled-by-default** UI-only connection for d
 3. In **OpenChatX → Settings → General → Tailscale mobile access**, enable the feature and enter that computer's IPv4 (a `100.64.0.0/10` address). Save.
 4. Visit `http://<computer-tailscale-ip>:<openchatx-port>/ui/` on another authorized tailnet device (default port `8001`).
 
-Ordinary Tailscale installations require no further configuration. For nonstandard CLI installations or user-space daemons, the **Advanced** section offers an optional CLI executable path and Tailscale socket path. Only a connected pre-existing Tailscale installation is used.
+Ordinary Tailscale installations require no further configuration. Enter only this computer's Tailscale IPv4; OpenChatX validates it against the connected Tailscale interface and adds that address to the UI Host allowlist. The Tailscale CLI is detected automatically.
 
 ## How it works
 
@@ -23,7 +23,7 @@ The optional feature is part of the packaged runtime; no standalone Node script 
 
 Turn **OpenChatX → Settings → General → Tailscale mobile access → Off** and Save. OpenChatX removes its own Tailscale Serve mapping and stops its reverse proxy. A normal runtime shutdown leaves the owned Serve mapping in place for the next instance to reclaim; the mapped loopback port is temporarily unavailable during restart. The running app also reconciles the mapping periodically after Tailscale reconnects.
 
-If OpenChatX is unavailable, first inspect the active mapping with `tailscale serve status`. Only if the mapping on the configured OpenChatX port is known to belong to OpenChatX should you remove it with `tailscale serve --tcp=<openchatx-port> off`. For a custom userspace Tailscale socket, prefix the CLI with `--socket=<your-path>`.
+If OpenChatX is unavailable, first inspect the active mapping with `tailscale serve status`. Only if the mapping on the configured OpenChatX port is known to belong to OpenChatX should you remove it with `tailscale serve --tcp=<openchatx-port> off`. OpenChatX automatically detects the installed Tailscale client; no socket configuration is required.
 
 If OpenChatX crashes, Tailscale's Serve configuration may remain until the next app start; the stale mapping will normally point to a dead loopback proxy. OpenChatX reconciles its ownership record on the next startup.
 

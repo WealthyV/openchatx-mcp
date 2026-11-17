@@ -6,7 +6,6 @@ import {
   type IncomingHttpHeaders,
   type Server,
 } from "node:http"
-import { homedir } from "node:os"
 import { dirname, join } from "node:path"
 import process from "node:process"
 
@@ -37,42 +36,32 @@ const UI_PATH_PATTERN = /^\/ui(?:\/|$)/u
 const LOCAL_TARGET_PATTERN = /^127\.0\.0\.1:[0-9]{1,5}$/u
 
 const defaultCli: TailnetCli = {
-  run(settings, args) {
+  run(_settings, args) {
     let candidates: string[]
-    if (settings.cli_path) candidates = [expandHome(settings.cli_path)]
-    else if (process.platform === "win32")
+    if (process.platform === "win32")
       candidates = ["tailscale.exe", "C:\\Program Files\\Tailscale\\tailscale.exe"]
-    else candidates = ["tailscale", "/opt/homebrew/bin/tailscale", "/usr/local/bin/tailscale"]
+    else if (process.platform === "darwin")
+      candidates = [
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+        "/opt/homebrew/bin/tailscale",
+        "/usr/local/bin/tailscale",
+      ]
+    else candidates = ["tailscale"]
     for (const binary of candidates) {
       try {
-        return execFileSync(
-          binary,
-          [
-            ...(settings.socket_path ? [`--socket=${expandHome(settings.socket_path)}`] : []),
-            ...args,
-          ],
-          { encoding: "utf8", timeout: 10_000, maxBuffer: 1024 * 1024 }
-        ).trim()
+        return execFileSync(binary, args, {
+          encoding: "utf8",
+          timeout: 10_000,
+          maxBuffer: 1024 * 1024,
+        }).trim()
       } catch (error) {
-        if (
-          !settings.cli_path &&
-          error instanceof Error &&
-          "code" in error &&
-          error.code === "ENOENT"
-        )
-          continue
+        if (error instanceof Error && "code" in error && error.code === "ENOENT") continue
         const message = error instanceof Error ? error.message : String(error)
         throw new Error(`Tailscale CLI failed: ${message}`, { cause: error })
       }
     }
     throw new Error("Tailscale CLI not found. Install and connect Tailscale first.")
   },
-}
-
-function expandHome(value: string): string {
-  if (value === "~") return homedir()
-  if (value.startsWith("~/")) return join(homedir(), value.slice(2))
-  return value
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -103,18 +92,19 @@ function remotePath(raw: string | undefined, ip: string, port: number): string |
 
 export function createTailnetUiProxy(ip: string, port: number): Server {
   const remoteHost = `${ip}:${port}`
-  const remoteOrigin = `http://${remoteHost}`
+  const allowedHosts = new Set([ip, remoteHost])
+  const allowedOrigins = new Set([`http://${ip}`, `http://${remoteHost}`])
   const localHost = `127.0.0.1:${port}`
   return createServer((req, res) => {
     const path = remotePath(req.url, ip, port)
     const origin = req.headers.origin
     const safeMethod = ["GET", "HEAD", "OPTIONS"].includes(req.method ?? "")
     if (
-      req.headers.host !== remoteHost ||
+      !allowedHosts.has(req.headers.host ?? "") ||
       path === undefined ||
-      (origin !== undefined && origin !== remoteOrigin) ||
+      (origin !== undefined && !allowedOrigins.has(origin)) ||
       req.headers["sec-fetch-site"] === "cross-site" ||
-      (!safeMethod && origin !== remoteOrigin)
+      (!safeMethod && (origin === undefined || !allowedOrigins.has(origin)))
     ) {
       res.writeHead(403, { "Content-Type": "text/plain", "Cache-Control": "no-store" })
       res.end("Forbidden")

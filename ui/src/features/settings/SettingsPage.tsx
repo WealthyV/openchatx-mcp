@@ -470,37 +470,6 @@ function GeneralSettingsPage({
               }
             />
           </Field>
-          <details className="space-y-3 rounded-lg border p-3">
-            <summary className="cursor-pointer text-sm">{t("settings.tailnetUi.advanced")}</summary>
-            <div className="grid gap-3 pt-3">
-              <Field label={t("settings.tailnetUi.cli")}>
-                <input
-                  className={INPUT_CLASS}
-                  placeholder="Auto-detect"
-                  value={settings.tailnet_ui.cli_path}
-                  onChange={(event) =>
-                    setSettings({
-                      ...settings,
-                      tailnet_ui: { ...settings.tailnet_ui, cli_path: event.target.value },
-                    })
-                  }
-                />
-              </Field>
-              <Field label={t("settings.tailnetUi.socket")}>
-                <input
-                  className={INPUT_CLASS}
-                  placeholder="System default"
-                  value={settings.tailnet_ui.socket_path}
-                  onChange={(event) =>
-                    setSettings({
-                      ...settings,
-                      tailnet_ui: { ...settings.tailnet_ui, socket_path: event.target.value },
-                    })
-                  }
-                />
-              </Field>
-            </div>
-          </details>
           <p className="text-xs text-muted-foreground">{t("settings.tailnetUi.security")}</p>
         </CardContent>
       </Card>
