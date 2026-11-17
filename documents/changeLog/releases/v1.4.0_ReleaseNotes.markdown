@@ -1,0 +1,56 @@
+# OpenChatX 1.4.0 — Release Notes
+
+## 摘要
+
+1.4.0 著重改善長時間 Agent 工作、MCP OAuth、Subagent 相容性，以及桌面 App 的更新與狀態可靠性。使用者會更少遇到工作階段身分混淆、OAuth 到期後需要手動重連、工具呼叫卡住、更新失敗後殘留程序，或狀態檔案損毀導致功能無法繼續使用等問題。
+
+## Added
+
+- **完整 Subagent Harness 與工作階段管理**：新增生命週期 Hooks、工具權限與路徑範圍、平行唯讀工具呼叫、模型 fallback、Context Compaction、錯誤復原、檔案快照與結構化 Plan。Dashboard 可即時查看 Agent 狀態、思考摘要、工具活動及平行呼叫統計，並支援 Markdown、GFM 與數學公式。
+- **Agent 身分與 Dot 工作階段辨識**：所有 OpenChatX 工具呼叫使用固定的 Agent UUID；Dot 來源獨立辨識，並自動套用 Unlimited Context。
+- **Tailscale 行動端 UI 存取**：可透過已連線的 Tailnet 從其他裝置安全開啟 OpenChatX UI，不必另外架設公開服務。
+
+## Changed
+
+- **OAuth 自動續期**：在 Access Token 到期前自動刷新，啟動時還原續期排程；重新授權完成後自動恢復 MCP 連線。
+- **OpenCode Go / Beam Free 相容性**：為 Beam Free 避免傳送不支援的 Thinking 控制參數，並調整 Function Tool Schema；其他模型與 Provider 維持原本請求格式。
+- **Subagent 工作階段路由**：OpenCode Go 使用每個持久化對話穩定且獨立的 Session ID，避免多個 Agent 共用工作階段。
+- **工具活動呈現**：Dashboard 顯示工具呼叫統計、活動狀態及 Agent UUID，方便追蹤長時間工作。
+
+## Fixed
+
+- **Bash 工作終止**：逾時或取消時，若程序忽略 SIGTERM，會在寬限期後升級為 SIGKILL，避免工具呼叫無限等待及子程序殘留。
+- **狀態併發寫入**：Operational State 與 Capability Store 的更新會序列化，避免同時操作時互相覆蓋；狀態檔改用原子寫入。
+- **Summary / Timeline 復原**：遇到無效或截斷的 JSON 時隔離損毀檔案並恢復可用狀態；暫時性讀取錯誤不會被誤判為資料損毀。
+- **Durable Job**：修正 Kill Timer 持久化失敗時未處理的 Promise rejection，避免背景錯誤影響整個 Runtime。
+- **Windows 桌面更新**：遞迴終止更新目標的程序樹，驗證原始程序身分，並確認程序退出後才執行回滾，降低更新失敗後檔案遭占用的機率。
+- **更新來源驗證**：修正 Release 資產信任的 Repository Owner，讓更新器能從目前的官方 Repository 取得資產。
+- **Dashboard 密鑰遮罩**：工具參數預覽會遮罩 Token、API Key 等敏感值，降低憑證意外出現在畫面上的風險。
+- **MCP OAuth 外部連結**：桌面 App 會將 OAuth 授權連結交由系統瀏覽器開啟。
+- **Agent / Dot 身分同步**：修正 Agent UUID 缺漏、Dot 辨識及 Unlimited Context 套用不一致的問題。
+
+## Breaking Changes
+
+- 所有 OpenChatX 工具呼叫（包含經 OpenChatX 包裝的外部 MCP 工具）都必須提供有效 UUID v4 格式的 `agent_id`。未提供或格式錯誤會在執行前被拒絕。Agent 應在首次 `start_here` 前建立 UUID，並在後續呼叫沿用。
+- `windowId` 僅用於辨識 Dot 來源，不再作為 Agent 身分或 Session Key。
+
+## Contributors
+
+Thank you to **@Yu-0312** for contributing the Bash termination, operational-state concurrency, Durable Job persistence, Summary / Timeline recovery, and Capability Store reliability fixes.
+
+Thank you to **@vermilionjack** for contributing stable OpenCode Go subagent session routing.
+
+## 使用者升級後的影響
+
+- 長時間 Subagent 工作更容易追蹤、管理與復原。
+- OAuth Token 可自動續期，通常不必等到工具呼叫失敗才重新授權。
+- OpenCode Go 的 Subagent 對話可維持獨立工作階段，Beam Free 可正常使用相容的工具參數格式。
+- 背景工作、狀態儲存與更新回滾更可靠。
+- 工具參數預覽降低敏感憑證曝光風險。
+- Tailscale 使用者可從 Tailnet 內的行動裝置存取 UI。
+
+## 版本資訊
+
+- Version: 1.4.0
+- Base: v1.3.0
+- Release scope: 2026-11-12 至 2026-11-17
