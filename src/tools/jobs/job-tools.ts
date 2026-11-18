@@ -171,35 +171,11 @@ interface JobWaitOptions {
   onProgress?: (message: string) => Promise<void>
 }
 
-async function waitForJobProgress(
-  jobs: JobManager,
-  id: string,
-  options: JobWaitOptions & { onProgress: (message: string) => Promise<void> }
-): Promise<Awaited<ReturnType<JobManager["wait"]>>> {
-  const { cursor, waitMs, maxBytes, signal, onProgress } = options
-  const deadline = Date.now() + waitMs
-  let streamedCursor = cursor
-  while (Date.now() < deadline) {
-    const part = await jobs.wait(
-      id,
-      Math.min(750, Math.max(0, deadline - Date.now())),
-      streamedCursor,
-      16 * 1024,
-      signal
-    )
-    streamedCursor = part.nextCursor
-    if (part.output) await onProgress(part.output).catch(() => undefined)
-    if (part.job.status !== "running") break
-  }
-  return jobs.wait(id, 0, cursor, maxBytes, signal)
-}
-
 async function waitJob(jobs: JobManager, options: JobWaitOptions) {
   const { id, cursor, waitMs, maxBytes, signal, onProgress } = options
   if (!id) throw new Error("id is required for action=wait.")
-  const result = onProgress
-    ? await waitForJobProgress(jobs, id, { ...options, onProgress })
-    : await jobs.wait(id, waitMs, cursor, maxBytes, signal)
+  if (onProgress) await jobs.streamLogProgress(id, waitMs, cursor, onProgress, signal)
+  const result = await jobs.wait(id, onProgress ? 0 : waitMs, cursor, maxBytes, signal)
   return {
     structuredContent: {
       ...result,
