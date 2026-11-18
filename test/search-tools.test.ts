@@ -1,6 +1,7 @@
 import assert from "node:assert/strict"
 import { mkdir, utimes, writeFile } from "node:fs/promises"
 import { join } from "node:path"
+import process from "node:process"
 import test from "node:test"
 
 import { Client } from "@modelcontextprotocol/client"
@@ -18,6 +19,37 @@ async function connectedSearchServer(t: test.TestContext) {
   t.after(() => Promise.all([client.close(), server.close()]))
   return client
 }
+
+test("glob and grep work without ripgrep on PATH", async (t) => {
+  const root = await tempDir(t, "openchatx-search-no-system-rg-")
+  const target = join(root, "sample.ts")
+  await writeFile(target, "const bundledRipgrep = true\n")
+
+  const client = await connectedSearchServer(t)
+  const originalPath = process.env.PATH
+  process.env.PATH = root
+  try {
+    const glob = await client.callTool({
+      name: "glob",
+      arguments: { pattern: "*.ts", path: root },
+    })
+    assert.equal(glob.isError, undefined)
+    assert.deepEqual((glob.structuredContent as { files: string[] }).files, [target])
+
+    const grep = await client.callTool({
+      name: "grep",
+      arguments: { pattern: "bundledRipgrep", path: root, include: "*.ts" },
+    })
+    assert.equal(grep.isError, undefined)
+    assert.deepEqual(
+      (grep.structuredContent as { matches: Array<{ path: string; line: number }> }).matches,
+      [{ path: target, line: 1, text: "const bundledRipgrep = true" }]
+    )
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH
+    else process.env.PATH = originalPath
+  }
+})
 
 test("glob searches directly with ripgrep and sorts matches by modification time", async (t) => {
   const root = await tempDir(t, "openchatx-glob-")
