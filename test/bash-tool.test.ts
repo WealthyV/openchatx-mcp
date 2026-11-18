@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { appendFileSync } from "node:fs"
 import { access, mkdir, readFile, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import process from "node:process"
@@ -17,17 +18,29 @@ import { registerBashProcessTool } from "../src/tools/shell/bash-process-tool.js
 import { registerBashTool } from "../src/tools/shell/bash-tool.js"
 import { tempDir } from "./helpers/temp.js"
 
-async function connectedBash(t: test.TestContext) {
+async function connectedBash(
+  t: test.TestContext,
+  onJobs?: (jobs: JobManager) => void,
+  beforeProgress?: () => Promise<void>
+) {
   const state = await tempDir(t, "openchatx-bash-manager-")
   const manager = new BashProcessManager(join(state, "logs"))
   const jobs = new JobManager(join(state, "jobs"), join(state, "jobs", "jobs.json"))
   await jobs.initialize()
+  onJobs?.(jobs)
   const server = new McpServer({ name: "bash-test", version: "1.0.0" })
   const client = new Client({ name: "bash-client", version: "1.0.0" })
   registerBashTool(server, manager, undefined, jobs)
   registerBashProcessTool(server, manager)
   registerJobTools(server, jobs)
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+  if (beforeProgress) {
+    const send = serverTransport.send.bind(serverTransport)
+    serverTransport.send = async (message, options) => {
+      if ("method" in message && message.method === "notifications/progress") await beforeProgress()
+      await send(message, options)
+    }
+  }
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
   t.after(() => Promise.all([client.close(), server.close(), jobs.close()]))
   return client
@@ -156,6 +169,138 @@ test("bash emits incremental MCP progress for long-running foreground commands",
   assert.match(output, /phase-two/u)
   assert.ok(fragments.some((item) => item.includes("phase-one")))
   assert.ok(fragments.some((item) => item.includes("phase-two")))
+})
+
+test("bash retains the tail of large completed logs before forgetting its durable job", async (t) => {
+  const cwd = await tempDir(t, "openchatx-bash-tail-test-")
+  const client = await connectedBash(t)
+  const invocation =
+    process.platform === "win32" ? `& "${process.execPath}"` : `"${process.execPath}"`
+  const command = `${invocation} -e 'process.stdout.write("A".repeat(320000) + "TAIL_MARKER\\n")'`
+  const result = await client.callTool({
+    name: "bash",
+    arguments: { command, workdir: cwd, timeout_ms: 10_000, max_output_tokens: 18_000 },
+  })
+  assert.notEqual(result.isError, true)
+  const resultData = result.structuredContent as {
+    output: string
+    output_truncated?: boolean
+    exit_code: number
+  }
+  assert.equal(resultData.exit_code, 0)
+  assert.equal(resultData.output_truncated, true)
+  assert.match(resultData.output, /TAIL_MARKER/u)
+})
+
+test("bash streams every unread chunk when a large job completes", async (t) => {
+  const cwd = await tempDir(t, "openchatx-bash-terminal-progress-")
+  const client = await connectedBash(t)
+  const invocation =
+    process.platform === "win32" ? `& "${process.execPath}"` : `"${process.execPath}"`
+  const command = `${invocation} -e 'process.stdout.write("x".repeat(20000) + "FINAL_PROGRESS_MARKER\\n")'`
+  const fragments: string[] = []
+  const result = await client.callTool(
+    {
+      name: "bash",
+      arguments: { command, workdir: cwd, timeout_ms: 10_000 },
+    },
+    {
+      onprogress: (progress) => {
+        if (progress.message) fragments.push(progress.message)
+      },
+    }
+  )
+  assert.equal(result.isError, undefined)
+  assert.equal(fragments.join(""), `${"x".repeat(20000)}FINAL_PROGRESS_MARKER\n`)
+})
+
+test("job_manage streams every unread chunk when the job is already completed", async (t) => {
+  const cwd = await tempDir(t, "openchatx-job-terminal-progress-")
+  let delayed = false
+  const client = await connectedBash(t, undefined, async () => {
+    if (delayed) return
+    delayed = true
+    await new Promise((resolve) => setTimeout(resolve, 1_250))
+  })
+  const invocation =
+    process.platform === "win32" ? `& "${process.execPath}"` : `"${process.execPath}"`
+  const command = `${invocation} -e 'process.stdout.write("x".repeat(20000) + "FINAL_PROGRESS_MARKER\\n")'`
+  const started = await client.callTool({
+    name: "job_manage",
+    arguments: { action: "start", label: "Terminal progress fixture", cwd, command },
+  })
+  assert.equal(started.isError, undefined)
+  const jobId = (started.structuredContent as { job: { id: string } }).job.id
+  // Finish the job first; the slow first notification then exceeds the wait deadline.
+  const finished = await client.callTool({
+    name: "job_manage",
+    arguments: { action: "wait", id: jobId, cursor: 0, wait_ms: 10_000 },
+  })
+  assert.equal((finished.structuredContent as { job: { status: string } }).job.status, "completed")
+  const fragments: string[] = []
+  const result = await client.callTool(
+    {
+      name: "job_manage",
+      arguments: { action: "wait", id: jobId, cursor: 0, wait_ms: 1_000 },
+    },
+    {
+      onprogress: (progress) => {
+        if (progress.message) fragments.push(progress.message)
+      },
+    }
+  )
+  assert.equal(result.isError, undefined)
+  assert.equal((result.structuredContent as { job: { status: string } }).job.status, "completed")
+  assert.equal(delayed, true)
+  assert.equal(fragments.join(""), `${"x".repeat(20000)}FINAL_PROGRESS_MARKER\n`)
+})
+
+test("job_manage drains a fixed terminal log snapshot while writes continue", async (t) => {
+  const cwd = await tempDir(t, "openchatx-job-growing-terminal-")
+  const client = await connectedBash(t)
+  const invocation =
+    process.platform === "win32" ? `& "${process.execPath}"` : `"${process.execPath}"`
+  const started = await client.callTool({
+    name: "job_manage",
+    arguments: {
+      action: "start",
+      label: "Growing terminal log fixture",
+      cwd,
+      command: `${invocation} -e 'process.stdout.write("x".repeat(16384) + "🙂" + "y".repeat(17000) + "END")'`,
+    },
+  })
+  const { id, logPath } = (started.structuredContent as { job: { id: string; logPath: string } })
+    .job
+  const finished = await client.callTool({
+    name: "job_manage",
+    arguments: { action: "wait", id, wait_ms: 10_000 },
+  })
+  assert.equal((finished.structuredContent as { job: { status: string } }).job.status, "completed")
+
+  const fragments: string[] = []
+  const result = await client.callTool(
+    {
+      name: "job_manage",
+      arguments: { action: "wait", id, cursor: 1, wait_ms: 1_000, max_bytes: 8 },
+    },
+    {
+      onprogress: ({ message }) => {
+        if (!message) return
+        fragments.push(message)
+        // Model a writer that keeps appending after terminal status. Cap the
+        // fixture so a regression fails by assertion rather than hanging.
+        if (fragments.length <= 4) appendFileSync(logPath, "L".repeat(16384))
+      },
+    }
+  )
+  assert.equal(result.isError, undefined)
+  const streamed = fragments.join("")
+  const snapshot = `${"x".repeat(16383)}🙂${"y".repeat(17000)}END`
+  assert.equal(streamed.length, snapshot.length, "must not stream bytes appended after snapshot")
+  assert.equal(streamed, snapshot)
+  const final = result.structuredContent as { output: string; next_cursor: number }
+  assert.equal(final.output, "xxxxxxxx")
+  assert.equal(final.next_cursor, 9)
 })
 
 test("job_manage wait streams durable job logs without changing its final response", async (t) => {

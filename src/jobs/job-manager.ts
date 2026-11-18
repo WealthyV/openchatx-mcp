@@ -48,10 +48,59 @@ const jobSchema = z.object({
 const jobStateSchema = z.object({ jobs: z.array(jobSchema) })
 
 const MAX_LOG_BYTES = 128 * 1024
+// A UTF-8 codepoint occupies at most four bytes. The small lookahead lets a
+// cursor-based reader return whole characters even if maxBytes splits one.
+const UTF8_MAX_LOOKAHEAD = 3
+
+function invalidUtf8SecondByte(lead: number, second: number): boolean {
+  return (
+    (lead === 0xe0 && second < 0xa0) ||
+    (lead === 0xed && second > 0x9f) ||
+    (lead === 0xf0 && second < 0x90) ||
+    (lead === 0xf4 && second > 0x8f)
+  )
+}
+
+function utf8Unit(buffer: Buffer, start: number): { end: number; incomplete: boolean } {
+  const first = buffer.readUInt8(start)
+  let width = 1
+  if (first >= 0xc2 && first <= 0xdf) width = 2
+  else if (first >= 0xe0 && first <= 0xef) width = 3
+  else if (first >= 0xf0 && first <= 0xf4) width = 4
+
+  // A UTF-8 decoder replaces one maximal malformed prefix per replacement
+  // character. Treat that prefix as one indivisible cursor unit.
+  let end = start + 1
+  while (end < start + width && end < buffer.length) {
+    const byte = buffer.readUInt8(end)
+    if ((byte & 0xc0) !== 0x80 || (end === start + 1 && invalidUtf8SecondByte(first, byte))) {
+      return { end, incomplete: false }
+    }
+    end++
+  }
+  return { end, incomplete: end === buffer.length && end < start + width }
+}
+
+function utf8ChunkLength(buffer: Buffer, maxBytes: number, running: boolean): number {
+  const limit = Math.min(buffer.length, maxBytes)
+  let cursor = 0
+  let lastBoundary = 0
+  while (cursor < buffer.length) {
+    const unit = utf8Unit(buffer, cursor)
+    // Only an actually valid but unfinished unit can wait for future bytes.
+    if (running && unit.incomplete) return lastBoundary
+    if (unit.end > limit && lastBoundary > 0) return lastBoundary
+    if (unit.end >= limit) return unit.end
+    lastBoundary = unit.end
+    cursor = unit.end
+  }
+  return cursor
+}
 
 export interface DurableJobLogSlice {
   job: DurableJob
   output: string
+  /** True when this response has not yet returned every currently available byte. */
   truncated: boolean
   nextCursor: number
 }
@@ -172,45 +221,83 @@ export class JobManager {
     maxBytes = 16 * 1024
   ): Promise<{ job: DurableJob; output: string; truncated: boolean }> {
     const job = await this.get(id)
-    let data: Buffer
+    const limit = Math.min(Math.max(maxBytes, 1), MAX_LOG_BYTES)
+    let handle: Awaited<ReturnType<typeof open>> | undefined
     try {
-      data = await readFile(job.logPath)
+      // This is deliberately a tail read, unlike cursor-based readLogFrom().
+      // Seek rather than loading the entire potentially huge job log into RAM.
+      handle = await open(job.logPath, "r")
+      const size = (await handle.stat()).size
+      const start = Math.max(0, size - limit)
+      const length = size - start
+      const data = Buffer.alloc(length)
+      let bytesRead = 0
+      while (bytesRead < length) {
+        const part = await handle.read(data, bytesRead, length - bytesRead, start + bytesRead)
+        if (!part.bytesRead) break
+        bytesRead += part.bytesRead
+      }
+      return { job, output: data.subarray(0, bytesRead).toString("utf8"), truncated: size > limit }
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
-      data = Buffer.alloc(0)
-    }
-    const limit = Math.min(Math.max(maxBytes, 1), MAX_LOG_BYTES)
-    const truncated = data.length > limit
-    return {
-      job,
-      output: (truncated ? data.subarray(data.length - limit) : data).toString("utf8"),
-      truncated,
+      return { job, output: "", truncated: false }
+    } finally {
+      await handle?.close()
     }
   }
 
   async readLogFrom(id: string, cursor = 0, maxBytes = 16 * 1024): Promise<DurableJobLogSlice> {
+    return (await this.readLogSlice(id, cursor, maxBytes)).part
+  }
+
+  private async readLogSlice(
+    id: string,
+    cursor: number,
+    maxBytes: number,
+    endOffset?: number
+  ): Promise<{ part: DurableJobLogSlice; startOffset: number; endOffset: number }> {
     const job = await this.get(id)
     const limit = Math.min(Math.max(maxBytes, 1), MAX_LOG_BYTES)
     let handle: Awaited<ReturnType<typeof open>> | undefined
     try {
       handle = await open(job.logPath, "r")
-      const size = (await handle.stat()).size
-      const boundedCursor = Math.min(Math.max(cursor, 0), size)
-      const unread = size - boundedCursor
-      const truncated = unread > limit
-      const start = truncated ? size - limit : boundedCursor
-      const length = size - start
+      const logSize = (await handle.stat()).size
+      const size = endOffset === undefined ? logSize : Math.min(logSize, endOffset)
+      // Ordinary reads restart after truncation; a terminal drain must not rewind.
+      const boundedCursor = cursor > size && endOffset === undefined ? 0 : Math.max(cursor, 0)
+      const unread = Math.max(0, size - boundedCursor)
+      // Incremental cursor reads must not skip unread bytes.
+      const start = boundedCursor
+      const length = Math.min(unread, limit + UTF8_MAX_LOOKAHEAD)
       const buffer = Buffer.alloc(length)
-      if (length > 0) await handle.read(buffer, 0, length, start)
+      let bytesRead = 0
+      while (bytesRead < length) {
+        const part = await handle.read(buffer, bytesRead, length - bytesRead, start + bytesRead)
+        if (!part.bytesRead) break
+        bytesRead += part.bytesRead
+      }
+      const emittedBytes = utf8ChunkLength(
+        buffer.subarray(0, bytesRead),
+        limit,
+        job.status === "running"
+      )
       return {
-        job,
-        output: buffer.toString("utf8"),
-        truncated,
-        nextCursor: size,
+        part: {
+          job,
+          output: buffer.subarray(0, emittedBytes).toString("utf8"),
+          truncated: size > start + emittedBytes,
+          nextCursor: start + emittedBytes,
+        },
+        startOffset: start,
+        endOffset: size,
       }
     } catch (error) {
       if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error
-      return { job, output: "", truncated: false, nextCursor: 0 }
+      return {
+        part: { job, output: "", truncated: false, nextCursor: 0 },
+        startOffset: 0,
+        endOffset: 0,
+      }
     } finally {
       await handle?.close()
     }
@@ -223,6 +310,49 @@ export class JobManager {
     maxBytes = 16 * 1024,
     signal?: AbortSignal
   ): Promise<DurableJobLogSlice> {
+    await this.waitForJob(id, waitMs, signal)
+    return this.readLogFrom(id, cursor, maxBytes)
+  }
+
+  async streamLogProgress(
+    id: string,
+    waitMs: number,
+    initialCursor: number,
+    onProgress: (output: string) => Promise<void>,
+    signal?: AbortSignal
+  ): Promise<void> {
+    const deadline = Date.now() + waitMs
+    let cursor = initialCursor
+    let endOffset: number | undefined
+    for (;;) {
+      signal?.throwIfAborted()
+      if (endOffset === undefined) {
+        const remaining = deadline - Date.now()
+        if (remaining > 0) {
+          await this.waitForJob(id, Math.min(750, remaining), signal)
+        } else if ((await this.get(id)).status === "running") {
+          // A slow notification can span both completion and the wait deadline.
+          // Check once without waiting; only a terminal job gets drained now.
+          break
+        }
+      }
+      const {
+        part,
+        startOffset,
+        endOffset: observedEnd,
+      } = await this.readLogSlice(id, cursor, 16 * 1024, endOffset)
+      // Terminal status doesn't guarantee that the producer has stopped.
+      // Drain only the EOF sampled by the first terminal read, even past the deadline.
+      if (part.job.status !== "running") endOffset ??= observedEnd
+      signal?.throwIfAborted()
+      if (part.output) await onProgress(part.output).catch(() => undefined)
+      signal?.throwIfAborted()
+      if (endOffset !== undefined && (!part.truncated || part.nextCursor <= startOffset)) break
+      cursor = part.nextCursor
+    }
+  }
+
+  private async waitForJob(id: string, waitMs: number, signal?: AbortSignal): Promise<void> {
     const deadline = Date.now() + Math.max(waitMs, 0)
     let job = await this.get(id)
     while (job.status === "running" && Date.now() < deadline) {
@@ -230,7 +360,6 @@ export class JobManager {
       await delay(Math.min(250, remaining), undefined, { signal })
       job = await this.get(id)
     }
-    return this.readLogFrom(id, cursor, maxBytes)
   }
 
   async cancel(id: string): Promise<DurableJob> {

@@ -154,37 +154,6 @@ async function runKeptCommand(command: string, cwd: string, processManager?: Bas
   }
 }
 
-/**
- * Forward incremental stdout/stderr while retaining the original bounded
- * result contract and the Durable Job's foreground wait semantics.
- */
-async function waitForDurableProgress(
-  jobs: JobManager,
-  jobId: string,
-  input: BashExecutionInput
-): Promise<Awaited<ReturnType<JobManager["wait"]>>> {
-  if (!input.onProgress) return jobs.wait(jobId, input.waitMs, 0, MAX_CAPTURE_BYTES, input.signal)
-  const deadline = Date.now() + input.waitMs
-  let cursor = 0
-  while (Date.now() < deadline) {
-    const remaining = deadline - Date.now()
-    const part = await jobs.wait(
-      jobId,
-      Math.min(750, Math.max(0, remaining)),
-      cursor,
-      16 * 1024,
-      input.signal
-    )
-    cursor = part.nextCursor
-    if (part.output) {
-      // A disconnected MCP UI must not change the command's outcome.
-      await input.onProgress(part.output).catch(() => undefined)
-    }
-    if (part.job.status !== "running") break
-  }
-  return jobs.wait(jobId, 0, 0, MAX_CAPTURE_BYTES, input.signal)
-}
-
 async function runDurableCommand(
   command: string,
   cwd: string,
@@ -202,11 +171,20 @@ async function runDurableCommand(
   )
   let waited: Awaited<ReturnType<JobManager["wait"]>>
   try {
-    waited = await waitForDurableProgress(jobs, job.id, input)
+    if (input.onProgress) {
+      await jobs.streamLogProgress(job.id, input.waitMs, 0, input.onProgress, input.signal)
+    }
+    waited = await jobs.wait(
+      job.id,
+      input.onProgress ? 0 : input.waitMs,
+      0,
+      MAX_CAPTURE_BYTES,
+      input.signal
+    )
   } catch (error) {
     if (isUserForcedStop(input.signal.reason)) {
       await jobs.cancel(job.id)
-      const partial = await jobs.readLogFrom(job.id, 0, MAX_CAPTURE_BYTES)
+      const partial = await jobs.readLog(job.id, MAX_CAPTURE_BYTES)
       const bounded = tokenPrefix(withApplyPatchToolHint(partial.output), input.maxOutputTokens)
       return {
         structuredContent: {
@@ -221,17 +199,23 @@ async function runDurableCommand(
     }
     throw error
   }
-  const bounded = tokenPrefix(withApplyPatchToolHint(waited.output), input.maxOutputTokens)
-  if (waited.job.status === "running")
+  if (waited.job.status === "running") {
+    const bounded = tokenPrefix(withApplyPatchToolHint(waited.output), input.maxOutputTokens)
     return durableRunningResult(cwd, waited, bounded.value, bounded.truncated)
+  }
 
+  // Completed shell calls historically return the log tail. The incremental
+  // cursor reader now returns its prefix, so use the dedicated tail reader
+  // before forget() deletes the durable log.
+  const finalLog = await jobs.readLog(job.id, MAX_CAPTURE_BYTES)
+  const bounded = tokenPrefix(withApplyPatchToolHint(finalLog.output), input.maxOutputTokens)
   const result = {
     structuredContent: {
       cwd,
       exit_code: waited.job.exitCode ?? (waited.job.status === "completed" ? 0 : 1),
       output: bounded.value,
       ...(waited.job.timedOut ? { timed_out: true } : {}),
-      ...(bounded.truncated || waited.truncated ? { output_truncated: true } : {}),
+      ...(bounded.truncated || finalLog.truncated ? { output_truncated: true } : {}),
     },
     content: [],
   }
