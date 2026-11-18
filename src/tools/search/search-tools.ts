@@ -3,6 +3,7 @@ import { stat } from "node:fs/promises"
 import { basename, dirname, isAbsolute, join, resolve } from "node:path"
 
 import type { McpServer } from "@modelcontextprotocol/server"
+import { rgPath } from "@vscode/ripgrep"
 import { z } from "zod"
 
 import { MCP_CONFIG } from "../../config.js"
@@ -235,7 +236,7 @@ async function runRg(
   signal: AbortSignal
 ): Promise<{ code: number; stdout: string; stderr: string }> {
   return new Promise((resolvePromise, reject) => {
-    const child = spawn("rg", args, {
+    const child = spawn(rgPath, args, {
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
       signal,
