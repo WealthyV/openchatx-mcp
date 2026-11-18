@@ -237,7 +237,12 @@ export class JobManager {
     await this.ensureLoaded()
     const job = this.jobs.get(id)
     if (!job) throw new Error(`Unknown durable job ${JSON.stringify(id)}.`)
-    if (job.status === "running" && isProcessRunning(job.pid)) {
+    // A late cancellation must not rewrite a completed or failed result.
+    if (job.status !== "running") {
+      await this.persistChain // A terminal result must be durable before it is acknowledged.
+      return { ...job }
+    }
+    if (isProcessRunning(job.pid)) {
       try {
         signalProcessTree(job.pid, "SIGTERM")
       } catch {
