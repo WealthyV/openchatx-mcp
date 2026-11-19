@@ -146,7 +146,7 @@ const projectWorkspaces = new ProjectWorkspaceService(
   goalRegistry,
   toolboxRegistry,
   () => MCP_CONFIG.externalMcp.configFile,
-  () => externalMcp.reload(true)
+  (path) => externalMcp.reload(true, path)
 )
 projectScope.setWorkspaceActivator(async (projectId) => {
   await projectWorkspaces.activate(projectId)

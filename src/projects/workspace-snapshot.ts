@@ -4,7 +4,11 @@ import { dirname, join } from "node:path"
 import { z } from "zod"
 
 import { MCP_CONFIG } from "../config.js"
-import { loadExternalMcpConfig, saveExternalMcpConfig } from "../external-mcp/config.js"
+import { loadExternalMcpConfig } from "../external-mcp/config.js"
+import {
+  updateExternalMcpConfig,
+  withExternalMcpConfig,
+} from "../external-mcp/config-transaction.js"
 import type { GoalRegistry, RegisteredGoal } from "../goals/goal-registry.js"
 import { loadOperationalState, updateOperationalState } from "../recovery/operational-state.js"
 import { loadSubagentConfig, saveSubagentConfig } from "../subagents/config.js"
@@ -94,7 +98,7 @@ export class ProjectWorkspaceService {
     private readonly toolboxes: ToolboxRegistry,
     private readonly externalMcpConfigPath: string | (() => string) = () =>
       MCP_CONFIG.externalMcp.configFile,
-    private readonly afterEnvironmentChange?: () => Promise<void>
+    private readonly reloadMcp?: (path: string) => Promise<void>
   ) {}
 
   private mcpConfigPath(): string {
@@ -104,19 +108,21 @@ export class ProjectWorkspaceService {
   }
 
   async snapshot(projectId: string): Promise<ProjectWorkspaceSnapshot> {
-    const [project, goals, operationalState] = await Promise.all([
+    const [project, goals, operationalState, mcpConfig] = await Promise.all([
       this.projects.get(projectId),
       this.goals.list({ projectId }),
       loadOperationalState(),
+      withExternalMcpConfig(this.mcpConfigPath(), loadExternalMcpConfig),
     ])
     const snapshot = workspaceSnapshotSchema.parse({
       format: "openchatx-project-workspace",
       version: 1,
       createdAt: new Date().toISOString(),
       project: projectForExport(project),
-      mcpServers: Object.entries(loadExternalMcpConfig(this.mcpConfigPath())).map(
-        ([id, server]) => ({ id, enabled: server.enabled })
-      ),
+      mcpServers: Object.entries(mcpConfig).map(([id, server]) => ({
+        id,
+        enabled: server.enabled,
+      })),
       capabilityPermissions: operationalState.capabilityPermissions,
       environment: this.environmentMetadata(),
       toolboxes: await Promise.all(
@@ -165,7 +171,6 @@ export class ProjectWorkspaceService {
     const restoredGoals = await this.restoreGoals(project.id, snapshot.goals)
     await this.restoreCapabilityPermissions(snapshot)
     this.restoreEnvironmentMetadata(snapshot)
-    await this.afterEnvironmentChange?.()
     await this.persistSnapshot(snapshot)
     return {
       project,
@@ -188,7 +193,6 @@ export class ProjectWorkspaceService {
     await this.restoreToolboxes(snapshot)
     await this.restoreCapabilityPermissions(snapshot)
     this.restoreEnvironmentMetadata(snapshot)
-    await this.afterEnvironmentChange?.()
     return snapshot
   }
 
@@ -244,19 +248,25 @@ export class ProjectWorkspaceService {
   }
 
   private async restoreMcp(snapshot: ProjectWorkspaceSnapshot) {
-    const config = loadExternalMcpConfig(this.mcpConfigPath())
     const restored: string[] = []
     const missing: string[] = []
-    for (const server of snapshot.mcpServers) {
-      const configured = config[server.id]
-      if (!configured) {
-        missing.push(server.id)
-        continue
-      }
-      configured.enabled = server.enabled
-      restored.push(server.id)
-    }
-    saveExternalMcpConfig(this.mcpConfigPath(), config)
+    await updateExternalMcpConfig(
+      this.mcpConfigPath(),
+      (path) => {
+        const config = loadExternalMcpConfig(path)
+        for (const server of snapshot.mcpServers) {
+          const configured = config[server.id]
+          if (!configured) {
+            missing.push(server.id)
+            continue
+          }
+          configured.enabled = server.enabled
+          restored.push(server.id)
+        }
+        return config
+      },
+      this.reloadMcp
+    )
     return { restored, missing }
   }
 
