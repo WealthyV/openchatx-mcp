@@ -1,0 +1,27 @@
+# OpenChatX 1.4.1 — Release Notes
+
+## 摘要
+
+1.4.1 是針對搜尋工具與長時間背景工作可靠性的修補版本。修正部分 macOS 裝置無法使用 `glob` / `grep`、大量工作日誌在進度通知中遺漏，以及已完成工作被取消操作覆寫狀態的問題。升級後，Agent 搜尋檔案更可靠，長時間工作的進度與最終結果也更完整。
+
+## Fixed
+
+- **搜尋工具不再依賴系統 ripgrep**：`glob` 和 `grep` 改用 OpenChatX 隨附的 ripgrep 執行檔。即使使用者沒有透過 Homebrew 等方式安裝 `rg`，也能正常搜尋檔案與內容。修復 [#33](https://github.com/WealthyV/openchatx-mcp/pull/33)。
+- **長篇工作日誌不再跳過中間內容**：`bash` 和 `job_manage` 依照讀取位置逐段傳送進度，避免超過單次讀取大小時遺失訊息，並避免把 UTF-8 字元切成兩半。工作結束時會讀取固定範圍的剩餘日誌，完成的 `bash` 呼叫仍保留最後一段輸出。修復 [#34](https://github.com/WealthyV/openchatx-mcp/pull/34)，透過 [#36](https://github.com/WealthyV/openchatx-mcp/pull/36) 整合。
+- **取消操作保留已完成工作的結果**：對已完成、失敗或中斷的 Durable Job 再按取消，不會將原本的狀態錯誤改成 `cancelled`；回應前也會等待待寫入的狀態完成持久化。修復 [#35](https://github.com/WealthyV/openchatx-mcp/pull/35)。
+
+## Contributors
+
+Thank you to **@vermilionjack** for contributing the bundled ripgrep fix, Durable Job terminal-state preservation, and complete incremental log streaming improvements.
+
+## 使用者升級後的影響
+
+- 不需要額外安裝 `rg`，Agent 就能使用 `glob`、`grep` 搜尋。
+- 長時間執行的命令即使產生大量輸出，也能在進度通知中取得更完整的日誌，方便診斷問題。
+- 已經完成或失敗的工作不會因為稍後按下取消而失去正確的執行結果。
+
+## 版本資訊
+
+- Version: 1.4.1
+- Base: v1.4.0
+- Release scope: PR #33、#35、#36（含原 PR #34）
