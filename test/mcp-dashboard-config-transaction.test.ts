@@ -369,3 +369,41 @@ test("registry reloads, updates, and file watching follow a retargeted configura
   await watchedRetired.promise
   assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["original"])
 })
+
+test("rollback preserves direct edits made while a reload is pending", async (t) => {
+  for (const originalExists of [true, false]) {
+    await t.test(originalExists ? "existing config file" : "new config file", async (subtest) => {
+      const dir = await tempDir(subtest, "openchatx-mcp-direct-edit-")
+      const path = join(dir, "mcp-servers.json")
+      if (originalExists) await writeFile(path, "{}\n")
+      const reload = pauseReload()
+      const directEdit = JSON.stringify({ direct: syntheticServer })
+      let attempts = 0
+      let recovered: string | undefined
+      const update = assert.rejects(
+        updateExternalMcpConfig(
+          path,
+          () => dashboardServers,
+          async () => {
+            if (++attempts === 1) {
+              await reload.pause()
+              throw new Error("Reload failed")
+            }
+            recovered = await readFile(path, "utf8")
+          }
+        ),
+        /Reload failed/
+      )
+      await reload.started
+      try {
+        await writeFile(path, directEdit)
+      } finally {
+        reload.release()
+      }
+      await update
+      assert.equal(attempts, 2)
+      assert.equal(recovered, directEdit)
+      assert.equal(await readFile(path, "utf8"), directEdit)
+    })
+  }
+})

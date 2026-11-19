@@ -46,14 +46,20 @@ export function updateExternalMcpConfig(
   return withExternalMcpConfig(path, async (canonicalPath) => {
     const next = parseExternalMcpConfig(update(canonicalPath))
     const previous = readConfigBytes(canonicalPath)
+    const contents = Buffer.from(`${JSON.stringify(next, null, 2)}\n`)
+    let written = false
     try {
-      writeExternalMcpConfig(canonicalPath, `${JSON.stringify(next, null, 2)}\n`)
+      writeExternalMcpConfig(canonicalPath, contents)
+      written = true
       await reload?.(canonicalPath)
       return next
     } catch (updateError) {
       try {
-        if (previous === undefined) rmSync(canonicalPath, { force: true })
-        else writeExternalMcpConfig(canonicalPath, previous)
+        // A direct file edit can land while the registry reload is pending.
+        if (!written || readConfigBytes(canonicalPath)?.equals(contents)) {
+          if (previous === undefined) rmSync(canonicalPath, { force: true })
+          else writeExternalMcpConfig(canonicalPath, previous)
+        }
         await reload?.(canonicalPath)
       } catch (recoveryError) {
         // biome-ignore lint/style/useErrorCause: AggregateError receives the cause in its third argument.
