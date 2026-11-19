@@ -4,6 +4,7 @@ import { basename, dirname, join, resolve } from "node:path"
 import { type ExternalMcpConfig, parseExternalMcpConfig, writeExternalMcpConfig } from "./config.js"
 
 const transactions = new Map<string, Promise<void>>()
+const retryPath = Symbol()
 
 export function canonicalExternalMcpConfigPath(path: string): string {
   const absolute = resolve(path)
@@ -23,18 +24,24 @@ export async function withExternalMcpConfig<T>(
   path: string,
   operation: (canonicalPath: string) => T | Promise<T>
 ): Promise<T> {
-  const canonicalPath = canonicalExternalMcpConfigPath(path)
-  const previous = transactions.get(canonicalPath) ?? Promise.resolve()
-  const pending = previous.then(() => operation(canonicalPath))
-  const finished = pending.then(
-    () => undefined,
-    () => undefined
-  )
-  transactions.set(canonicalPath, finished)
-  try {
-    return await pending
-  } finally {
-    if (transactions.get(canonicalPath) === finished) transactions.delete(canonicalPath)
+  for (;;) {
+    const canonicalPath = canonicalExternalMcpConfigPath(path)
+    const previous = transactions.get(canonicalPath) ?? Promise.resolve()
+    const pending = previous.then<T | typeof retryPath>(() =>
+      canonicalExternalMcpConfigPath(path) === canonicalPath ? operation(canonicalPath) : retryPath
+    )
+    const finished = pending.then(
+      () => undefined,
+      () => undefined
+    )
+    transactions.set(canonicalPath, finished)
+    try {
+      const result = await pending
+      if (result !== retryPath) return result
+    } finally {
+      if (transactions.get(canonicalPath) === finished) transactions.delete(canonicalPath)
+    }
+    // The configured path was retargeted while waiting. Join the new target's queue.
   }
 }
 

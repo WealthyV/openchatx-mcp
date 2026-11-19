@@ -11,7 +11,10 @@ import express from "express"
 import { createDashboardRouter } from "../src/agent/dashboard-routes.js"
 import { createAgentObserver } from "../src/agent/observer.js"
 import { MCP_CONFIG } from "../src/config.js"
-import { updateExternalMcpConfig } from "../src/external-mcp/config-transaction.js"
+import {
+  updateExternalMcpConfig,
+  withExternalMcpConfig,
+} from "../src/external-mcp/config-transaction.js"
 import { ExternalMcpOAuth } from "../src/external-mcp/oauth.js"
 import {
   createExternalMcpRegistry,
@@ -406,4 +409,70 @@ test("rollback preserves direct edits made while a reload is pending", async (t)
       assert.equal(await readFile(path, "utf8"), directEdit)
     })
   }
+})
+
+test("a queued save resolves the current config target before writing", async (t) => {
+  const dir = await tempDir(t, "openchatx-mcp-queued-target-")
+  const original = join(dir, "original")
+  const replacement = join(dir, "replacement")
+  const alias = join(dir, "alias")
+  const filename = "mcp-servers.json"
+  const originalFile = join(original, filename)
+  const replacementFile = join(replacement, filename)
+  await mkdir(original)
+  await mkdir(replacement)
+  await writeFile(originalFile, "{}\n")
+  await writeFile(replacementFile, "{}\n")
+  await symlink(original, alias, "junction")
+
+  const reload = pauseReload()
+  const holding = withExternalMcpConfig(originalFile, reload.pause)
+  await reload.started
+  const saving = updateExternalMcpConfig(join(alias, filename), () => dashboardServers)
+  try {
+    await rename(alias, join(dir, "old-alias"))
+    await symlink(replacement, alias, "junction")
+  } finally {
+    reload.release()
+  }
+  await Promise.all([holding, saving])
+  assert.deepEqual(JSON.parse(await readFile(replacementFile, "utf8")), dashboardServers)
+  assert.equal(await readFile(originalFile, "utf8"), "{}\n")
+})
+
+test("a config root switch rechecks its target after a pending registry reload", async (t) => {
+  const dir = await tempDir(t, "openchatx-mcp-switch-target-")
+  const source = join(dir, "source.json")
+  const original = join(dir, "original")
+  const replacement = join(dir, "replacement")
+  const alias = join(dir, "alias")
+  const filename = "mcp-servers.json"
+  await mkdir(original)
+  await mkdir(replacement)
+  await writeFile(source, JSON.stringify({ source: syntheticServer }))
+  await writeFile(join(original, filename), JSON.stringify({ original: syntheticServer }))
+  await writeFile(join(replacement, filename), JSON.stringify({ replacement: syntheticServer }))
+  await symlink(original, alias, "junction")
+
+  const oauth = new ExternalMcpOAuth()
+  const reload = pauseReload()
+  oauth.disconnect = async (id) => {
+    if (id === "source") await reload.pause()
+  }
+  const registry = await createExternalMcpRegistry(source, oauth)
+  t.after(() => registry.close())
+  await writeFile(source, "{}\n")
+  const reloading = registry.reload(true)
+  await reload.started
+  const switching = registry.setConfigPath?.(join(alias, filename))
+  try {
+    // Let the switch reach the registry queue before replacing the link.
+    await new Promise<void>((resolve) => setImmediate(resolve))
+    await rename(alias, join(dir, "old-alias"))
+    await symlink(replacement, alias, "junction")
+  } finally {
+    reload.release()
+  }
+  await Promise.all([reloading, switching])
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["replacement"])
 })

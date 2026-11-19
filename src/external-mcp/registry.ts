@@ -1,3 +1,4 @@
+import { mkdirSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
@@ -129,31 +130,39 @@ export async function createExternalMcpRegistry(
   }
   const enqueueReload = <T>(operation: () => Promise<T>): Promise<T> => {
     const reload = reloadQueue.then(operation)
-    reloadQueue = reload.then(
-      () => undefined,
-      () => undefined
-    )
+    const finished = () => undefined
+    reloadQueue = reload.then(finished, finished)
     return reload
   }
-  const reloadRegistry = async (force = false, transactionPath?: string): Promise<void> => {
-    const logicalPath = configPath
-    const reloadConfig = (path: string) =>
+  const applyToConfigTarget = async (
+    logicalPath: string,
+    apply: (path: string) => Promise<void>,
+    transactionPath?: string
+  ): Promise<void> => {
+    const applyIfCurrent = (path: string) =>
       enqueueReload(async () => {
-        if (closed || logicalPath !== configPath) return true
+        if (closed) return true
         if (path !== canonicalExternalMcpConfigPath(logicalPath)) return false
-        configWatcher.sync(logicalPath, path)
-        await applyRegistry(path, force)
+        await apply(path)
         return true
       })
-    if (transactionPath) {
-      await reloadConfig(transactionPath)
-      return
+    if (transactionPath) return applyIfCurrent(transactionPath).then(() => undefined)
+    let applied = await withExternalMcpConfig(logicalPath, applyIfCurrent)
+    while (!applied) {
+      applied = await withExternalMcpConfig(logicalPath, applyIfCurrent)
     }
-    // The symlink can change while this reload waits for the transaction.
-    let reloaded = await withExternalMcpConfig(logicalPath, reloadConfig)
-    while (!reloaded) {
-      reloaded = await withExternalMcpConfig(logicalPath, reloadConfig)
-    }
+  }
+  const reloadRegistry = (force = false, transactionPath?: string): Promise<void> => {
+    const logicalPath = configPath
+    return applyToConfigTarget(
+      logicalPath,
+      async (path) => {
+        if (logicalPath !== configPath) return
+        configWatcher.sync(logicalPath, path)
+        await applyRegistry(path, force)
+      },
+      transactionPath
+    )
   }
 
   oauth.setAuthorizedHandler(async () => {
@@ -296,17 +305,15 @@ export async function createExternalMcpRegistry(
     reload: reloadRegistry,
     setConfigPath(next: string) {
       const logicalPath = resolve(next)
-      const pending = configSwitchQueue.then(() =>
-        withExternalMcpConfig(logicalPath, (path) =>
-          enqueueReload(async () => {
-            if (closed || logicalPath === configPath) return
-            await mkdir(dirname(logicalPath), { recursive: true })
-            await applyRegistry(path, true, true)
-            configPath = logicalPath
-            configWatcher.sync(logicalPath, path)
-          })
-        )
-      )
+      const pending = configSwitchQueue.then(async () => {
+        if (closed || logicalPath === configPath) return
+        await applyToConfigTarget(logicalPath, async (path) => {
+          mkdirSync(dirname(logicalPath), { recursive: true })
+          await applyRegistry(path, true, true)
+          configPath = logicalPath
+          configWatcher.sync(logicalPath, path)
+        })
+      })
       configSwitchQueue = pending.catch(() => undefined)
       return pending
     },
