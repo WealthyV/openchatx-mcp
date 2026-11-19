@@ -1,3 +1,6 @@
+import { existsSync } from "node:fs"
+import { rm } from "node:fs/promises"
+import { resolve } from "node:path"
 import type { McpServer } from "@modelcontextprotocol/server"
 import { z } from "zod"
 
@@ -12,6 +15,26 @@ import type { ExternalMcpRegistry } from "../../external-mcp/registry.js"
 import { toToolError } from "../../mcp/tool-error.js"
 
 const actionSchema = z.enum(["create", "update", "delete", "enable", "disable"])
+
+// Keep reload/rollback transactions for the same config path in one queue.
+// Otherwise a failed reload can roll back a second, successful mutation.
+const mutationsByPath = new Map<string, Promise<void>>()
+
+async function serializeConfigMutation<T>(path: string, action: () => Promise<T>): Promise<T> {
+  const key = resolve(path)
+  const previous = mutationsByPath.get(key) ?? Promise.resolve()
+  const pending = previous.then(action, action)
+  const finished = pending.then(
+    () => undefined,
+    () => undefined
+  )
+  mutationsByPath.set(key, finished)
+  try {
+    return await pending
+  } finally {
+    if (mutationsByPath.get(key) === finished) mutationsByPath.delete(key)
+  }
+}
 
 const manageInputSchema = z.object({
   action: actionSchema,
@@ -47,9 +70,10 @@ export function registerMcpServerManagementTools(
     },
     async () => {
       try {
-        const config = loadExternalMcpConfig(
-          typeof configPath === "function" ? configPath() : configPath
-        )
+        const path = typeof configPath === "function" ? configPath() : configPath
+        // Take a serialized snapshot; an overlapping reload must not expose
+        // a provisional config which may still be rolled back.
+        const config = await serializeConfigMutation(path, async () => loadExternalMcpConfig(path))
         return {
           structuredContent: { servers: redactConfig(config) },
           content: [],
@@ -76,23 +100,46 @@ export function registerMcpServerManagementTools(
     async (input) => {
       try {
         const path = typeof configPath === "function" ? configPath() : configPath
-        const current = loadExternalMcpConfig(path)
-        const next = applyAction(current, input)
-        const saved = saveExternalMcpConfig(path, next)
-        await registry?.reload()
-        return {
-          structuredContent: {
-            ok: true,
-            restart_required: false,
-            servers: redactConfig(saved),
-          },
-          content: [
-            {
-              type: "text" as const,
-              text: "Saved and hot-reloaded MCP server configuration.",
+        return await serializeConfigMutation(path, async () => {
+          const current = loadExternalMcpConfig(path)
+          const next = applyAction(current, input)
+          const existed = existsSync(path)
+          let saved: ExternalMcpConfig
+          try {
+            saved = saveExternalMcpConfig(path, next)
+            await registry?.reload()
+          } catch (updateError) {
+            // Both write failures and reload failures can leave partial changes.
+            // Restore inside the same serialized transaction.
+            try {
+              if (existed) saveExternalMcpConfig(path, current)
+              else await rm(path, { force: true })
+              await registry?.reload()
+            } catch (recoveryError) {
+              // Preserve both failures; AggregateError already includes the original cause.
+              // biome-ignore lint/style/useErrorCause: AggregateError contains both failures and a cause.
+              throw new AggregateError(
+                [updateError, recoveryError],
+                "MCP config update failed and recovery could not complete.",
+                { cause: updateError }
+              )
+            }
+            throw updateError
+          }
+          return {
+            structuredContent: {
+              ok: true,
+              restart_required: false,
+              servers: redactConfig(saved),
             },
-          ],
-        }
+            content: [
+              {
+                type: "text" as const,
+                text: "Saved and hot-reloaded MCP server configuration.",
+              },
+            ],
+          }
+        })
       } catch (error) {
         throw toToolError(error, "MCP_SERVER_MANAGE_FAILED")
       }
