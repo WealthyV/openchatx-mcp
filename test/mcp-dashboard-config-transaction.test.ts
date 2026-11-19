@@ -1,7 +1,8 @@
 import assert from "node:assert/strict"
 import { once } from "node:events"
 import { mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises"
-import { join } from "node:path"
+import { join, relative } from "node:path"
+import process from "node:process"
 import test, { type TestContext } from "node:test"
 
 import { Client } from "@modelcontextprotocol/client"
@@ -475,4 +476,60 @@ test("a config root switch rechecks its target after a pending registry reload",
   }
   await Promise.all([reloading, switching])
   assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["replacement"])
+})
+
+test("config paths resolve a parent component after following its symlink", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const dir = await tempDir(t, "openchatx-mcp-symlink-parent-")
+  const configured = join(dir, "configured")
+  const target = join(dir, "target")
+  const child = join(target, "child")
+  const alias = join(configured, "alias")
+  const filename = "mcp-servers.json"
+  const unrelated = join(configured, filename)
+  const expected = join(target, filename)
+  await mkdir(configured)
+  await mkdir(child, { recursive: true })
+  await symlink(child, alias, "dir")
+  await writeFile(unrelated, JSON.stringify({ unrelated: syntheticServer }))
+  const path = `${alias}/../${filename}`
+
+  // Saving through the logical path must create the missing file in the target's parent.
+  await updateExternalMcpConfig(path, () => dashboardServers)
+  assert.deepEqual(JSON.parse(await readFile(expected, "utf8")), dashboardServers)
+  assert.deepEqual(JSON.parse(await readFile(unrelated, "utf8")), { unrelated: syntheticServer })
+
+  const registry = await createExternalMcpRegistry(path)
+  t.after(() => registry.close())
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["dashboard"])
+  await updateExternalMcpConfig(
+    path,
+    () => ({ updated: syntheticServer }),
+    (transactionPath) => registry.reload(false, transactionPath)
+  )
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["updated"])
+  assert.deepEqual(JSON.parse(await readFile(expected, "utf8")), { updated: syntheticServer })
+  assert.deepEqual(JSON.parse(await readFile(unrelated, "utf8")), { unrelated: syntheticServer })
+
+  await registry.setConfigPath?.(unrelated)
+  await registry.setConfigPath?.(`${relative(process.cwd(), alias)}/../${filename}`)
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["updated"])
+
+  const dangling = join(configured, "redirected.json")
+  await symlink("alias/../redirected.json", dangling, "file")
+  await updateExternalMcpConfig(dangling, () => dashboardServers)
+  assert.deepEqual(
+    JSON.parse(await readFile(join(target, "redirected.json"), "utf8")),
+    dashboardServers
+  )
+})
+
+test("a missing POSIX config path ending in a separator is rejected", {
+  skip: process.platform === "win32",
+}, async (t) => {
+  const dir = await tempDir(t, "openchatx-mcp-config-separator-")
+  const filename = join(dir, "mcp-servers.json")
+  await assert.rejects(updateExternalMcpConfig(`${filename}/`, () => dashboardServers))
+  await assert.rejects(readFile(filename, "utf8"), { code: "ENOENT" })
 })

@@ -1,22 +1,35 @@
 import { lstatSync, readFileSync, readlinkSync, realpathSync, rmSync } from "node:fs"
-import { basename, dirname, join, resolve } from "node:path"
+import { basename, dirname, isAbsolute, resolve, sep } from "node:path"
+import process from "node:process"
 
 import { type ExternalMcpConfig, parseExternalMcpConfig, writeExternalMcpConfig } from "./config.js"
 
 const transactions = new Map<string, Promise<void>>()
 const retryPath = Symbol()
 
+export function absoluteExternalMcpConfigPath(path: string, base?: string): string {
+  if (process.platform === "win32") return base === undefined ? resolve(path) : resolve(base, path)
+  // POSIX resolves a parent component relative to any symlink already traversed.
+  return isAbsolute(path) ? path : appendPath(base ?? process.cwd(), path)
+}
+
 export function canonicalExternalMcpConfigPath(path: string): string {
-  const absolute = resolve(path)
+  const absolute = absoluteExternalMcpConfigPath(path)
   try {
     return realpathSync.native(absolute)
   } catch (error) {
     if (!isMissing(error)) throw error
     const parent = dirname(absolute)
     if (parent === absolute) return absolute
-    if (lstatSync(absolute, { throwIfNoEntry: false })?.isSymbolicLink())
-      return canonicalExternalMcpConfigPath(resolve(parent, readlinkSync(absolute)))
-    return join(canonicalExternalMcpConfigPath(parent), basename(absolute))
+    if (lstatSync(absolute, { throwIfNoEntry: false })?.isSymbolicLink()) {
+      const target = readlinkSync(absolute)
+      return canonicalExternalMcpConfigPath(absoluteExternalMcpConfigPath(target, parent))
+    }
+    const name = basename(absolute)
+    return appendPath(
+      canonicalExternalMcpConfigPath(parent),
+      absolute.endsWith(sep) ? `${name}${sep}` : name
+    )
   }
 }
 
@@ -79,6 +92,10 @@ export function updateExternalMcpConfig(
       throw updateError
     }
   })
+}
+
+function appendPath(parent: string, child: string): string {
+  return parent.endsWith(sep) ? `${parent}${child}` : `${parent}${sep}${child}`
 }
 
 function readConfigBytes(path: string): Buffer | undefined {

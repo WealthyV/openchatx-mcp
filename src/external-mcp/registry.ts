@@ -1,6 +1,6 @@
 import { mkdirSync } from "node:fs"
 import { mkdir } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
+import { dirname } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 
 import {
@@ -18,7 +18,11 @@ import { childStringEnvironment } from "../child-environment.js"
 import { runtimeProcessRegistry } from "../runtime/process-registry.js"
 import { installMacosDefaultTosGuard } from "../runtime/socket-tos-compat.js"
 import { type ExternalMcpServerConfig, loadExternalMcpConfig } from "./config.js"
-import { canonicalExternalMcpConfigPath, withExternalMcpConfig } from "./config-transaction.js"
+import {
+  absoluteExternalMcpConfigPath,
+  canonicalExternalMcpConfigPath,
+  withExternalMcpConfig,
+} from "./config-transaction.js"
 import { createExternalMcpConfigWatcher } from "./config-watcher.js"
 import { ExternalMcpOAuth, type McpOAuthState, shouldUseMcpOAuth } from "./oauth.js"
 
@@ -92,7 +96,7 @@ export async function createExternalMcpRegistry(
   initialConfigPath: string,
   oauth = new ExternalMcpOAuth()
 ): Promise<ExternalMcpRegistry> {
-  let configPath = resolve(initialConfigPath)
+  let configPath = absoluteExternalMcpConfigPath(initialConfigPath)
   await mkdir(dirname(configPath), { recursive: true })
   let config = await withExternalMcpConfig(configPath, loadExternalMcpConfig)
   let connections = await connectConfiguredServers(config, oauth)
@@ -304,7 +308,7 @@ export async function createExternalMcpRegistry(
     call: callRegisteredTool,
     reload: reloadRegistry,
     setConfigPath(next: string) {
-      const logicalPath = resolve(next)
+      const logicalPath = absoluteExternalMcpConfigPath(next)
       const pending = configSwitchQueue.then(async () => {
         if (closed || logicalPath === configPath) return
         await applyToConfigTarget(logicalPath, async (path) => {
