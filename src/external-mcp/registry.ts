@@ -1,6 +1,5 @@
-import { type FSWatcher, watch } from "node:fs"
 import { mkdir } from "node:fs/promises"
-import { basename, dirname } from "node:path"
+import { dirname, resolve } from "node:path"
 import { setTimeout as delay } from "node:timers/promises"
 
 import {
@@ -19,6 +18,7 @@ import { runtimeProcessRegistry } from "../runtime/process-registry.js"
 import { installMacosDefaultTosGuard } from "../runtime/socket-tos-compat.js"
 import { type ExternalMcpServerConfig, loadExternalMcpConfig } from "./config.js"
 import { canonicalExternalMcpConfigPath, withExternalMcpConfig } from "./config-transaction.js"
+import { createExternalMcpConfigWatcher } from "./config-watcher.js"
 import { ExternalMcpOAuth, type McpOAuthState, shouldUseMcpOAuth } from "./oauth.js"
 
 const DEFAULT_CONNECT_TIMEOUT_MS = 15_000
@@ -91,14 +91,12 @@ export async function createExternalMcpRegistry(
   initialConfigPath: string,
   oauth = new ExternalMcpOAuth()
 ): Promise<ExternalMcpRegistry> {
-  let configPath = canonicalExternalMcpConfigPath(initialConfigPath)
+  let configPath = resolve(initialConfigPath)
   await mkdir(dirname(configPath), { recursive: true })
   let config = await withExternalMcpConfig(configPath, loadExternalMcpConfig)
   let connections = await connectConfiguredServers(config, oauth)
 
   let registrations = buildRegistrations(connections)
-  let watcher: FSWatcher | undefined
-  let reloadTimer: NodeJS.Timeout | undefined
   let reloadQueue: Promise<void> = Promise.resolve()
   let configSwitchQueue: Promise<void> = Promise.resolve()
   let closed = false
@@ -129,18 +127,33 @@ export async function createExternalMcpRegistry(
     if (!preserveCredentials) await cleanupRetiredOAuthServers(oauth, previous, nextConfig)
     supervisor.sync()
   }
-  const enqueueReload = (operation: () => Promise<void>): Promise<void> => {
+  const enqueueReload = <T>(operation: () => Promise<T>): Promise<T> => {
     const reload = reloadQueue.then(operation)
-    reloadQueue = reload.catch(() => undefined)
+    reloadQueue = reload.then(
+      () => undefined,
+      () => undefined
+    )
     return reload
   }
-  const reloadRegistry = (force = false, transactionPath?: string): Promise<void> => {
+  const reloadRegistry = async (force = false, transactionPath?: string): Promise<void> => {
+    const logicalPath = configPath
     const reloadConfig = (path: string) =>
-      enqueueReload(() =>
-        !closed && path === configPath ? applyRegistry(path, force) : Promise.resolve()
-      )
-    if (transactionPath) return reloadConfig(transactionPath)
-    return withExternalMcpConfig(configPath, reloadConfig)
+      enqueueReload(async () => {
+        if (closed || logicalPath !== configPath) return true
+        if (path !== canonicalExternalMcpConfigPath(logicalPath)) return false
+        configWatcher.sync(logicalPath, path)
+        await applyRegistry(path, force)
+        return true
+      })
+    if (transactionPath) {
+      await reloadConfig(transactionPath)
+      return
+    }
+    // The symlink can change while this reload waits for the transaction.
+    let reloaded = await withExternalMcpConfig(logicalPath, reloadConfig)
+    while (!reloaded) {
+      reloaded = await withExternalMcpConfig(logicalPath, reloadConfig)
+    }
   }
 
   oauth.setAuthorizedHandler(async () => {
@@ -159,22 +172,8 @@ export async function createExternalMcpRegistry(
   supervisor.sync()
   supervisor.start()
 
-  const startWatcher = () => {
-    watcher?.close()
-    watcher = watch(dirname(configPath), (_event, filename) => {
-      if (filename && filename.toString() !== basename(configPath)) return
-      if (reloadTimer) clearTimeout(reloadTimer)
-      reloadTimer = setTimeout(() => {
-        void reloadRegistry().catch((error) => {
-          console.warn(
-            `External MCP config reload failed: ${error instanceof Error ? error.message : String(error)}`
-          )
-        })
-      }, 150)
-      reloadTimer.unref()
-    })
-  }
-  startWatcher()
+  const configWatcher = createExternalMcpConfigWatcher(() => reloadRegistry())
+  configWatcher.sync(configPath, canonicalExternalMcpConfigPath(configPath))
 
   const callRegisteredTool: ExternalMcpRegistry["call"] = (id, args, signal) =>
     callRegisteredExternalTool(registrations, supervisor, id, args, signal)
@@ -296,14 +295,15 @@ export async function createExternalMcpRegistry(
     call: callRegisteredTool,
     reload: reloadRegistry,
     setConfigPath(next: string) {
+      const logicalPath = resolve(next)
       const pending = configSwitchQueue.then(() =>
-        withExternalMcpConfig(next, (path) =>
+        withExternalMcpConfig(logicalPath, (path) =>
           enqueueReload(async () => {
-            if (closed || path === configPath) return
-            await mkdir(dirname(path), { recursive: true })
+            if (closed || logicalPath === configPath) return
+            await mkdir(dirname(logicalPath), { recursive: true })
             await applyRegistry(path, true, true)
-            configPath = path
-            startWatcher()
+            configPath = logicalPath
+            configWatcher.sync(logicalPath, path)
           })
         )
       )
@@ -313,8 +313,7 @@ export async function createExternalMcpRegistry(
     async close() {
       closed = true
       await reloadQueue
-      watcher?.close()
-      if (reloadTimer) clearTimeout(reloadTimer)
+      configWatcher.close()
       await supervisor.close()
       await closeConnections(connections)
       await oauth.close()

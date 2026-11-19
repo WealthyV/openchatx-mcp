@@ -1,6 +1,6 @@
 import assert from "node:assert/strict"
 import { once } from "node:events"
-import { mkdir, readFile, symlink, writeFile } from "node:fs/promises"
+import { mkdir, readFile, rename, symlink, writeFile } from "node:fs/promises"
 import { join } from "node:path"
 import test, { type TestContext } from "node:test"
 
@@ -12,6 +12,7 @@ import { createDashboardRouter } from "../src/agent/dashboard-routes.js"
 import { createAgentObserver } from "../src/agent/observer.js"
 import { MCP_CONFIG } from "../src/config.js"
 import { updateExternalMcpConfig } from "../src/external-mcp/config-transaction.js"
+import { ExternalMcpOAuth } from "../src/external-mcp/oauth.js"
 import {
   createExternalMcpRegistry,
   type ExternalMcpRegistry,
@@ -313,4 +314,58 @@ test("registry reload through a directory alias waits for the transaction to rec
     (transactionPath) => registry.reload(false, transactionPath)
   )
   assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["dashboard"])
+})
+
+test("registry reloads, updates, and file watching follow a retargeted configuration path", {
+  timeout: 10_000,
+}, async (t) => {
+  const dir = await tempDir(t, "openchatx-mcp-retarget-")
+  const original = join(dir, "original")
+  const replacement = join(dir, "replacement")
+  const alias = join(dir, "alias")
+  const filename = "mcp-servers.json"
+  await mkdir(original)
+  await mkdir(replacement)
+  await writeFile(join(original, filename), JSON.stringify({ original: syntheticServer }))
+  await writeFile(join(replacement, filename), JSON.stringify({ replacement: syntheticServer }))
+  await symlink(original, alias, "junction")
+  const path = join(alias, filename)
+  const oauth = new ExternalMcpOAuth()
+  const dashboardRetired = deferred()
+  const watchedRetired = deferred()
+  oauth.disconnect = async (id) => {
+    if (id === "dashboard") dashboardRetired.resolve()
+    if (id === "watched") watchedRetired.resolve()
+  }
+  const registry = await createExternalMcpRegistry(path, oauth)
+  t.after(() => registry.close())
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["original"])
+
+  await rename(alias, join(dir, "old-alias"))
+  await symlink(replacement, alias, "junction")
+  await registry.reload(true)
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["replacement"])
+
+  await updateExternalMcpConfig(
+    path,
+    () => dashboardServers,
+    (transactionPath) => registry.reload(false, transactionPath)
+  )
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["dashboard"])
+  assert.deepEqual(
+    JSON.parse(await readFile(join(replacement, filename), "utf8")),
+    dashboardServers
+  )
+  assert.deepEqual(JSON.parse(await readFile(join(original, filename), "utf8")), {
+    original: syntheticServer,
+  })
+
+  await writeFile(join(replacement, filename), JSON.stringify({ watched: syntheticServer }))
+  await dashboardRetired.promise
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["watched"])
+
+  await rename(alias, join(dir, "replacement-alias"))
+  await symlink(original, alias, "junction")
+  await watchedRetired.promise
+  assert.deepEqual(Object.keys(registry.authorization?.() ?? {}), ["original"])
 })
