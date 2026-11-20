@@ -1,13 +1,11 @@
 import type { Router } from "express"
 
-import type { ExternalMcpRegistry } from "../external-mcp/registry.js"
 import { timelineRegistry } from "../timeline/timeline-registry.js"
 import type { ProjectWorkspaceService } from "./workspace-snapshot.js"
 
 export function registerProjectWorkspaceRoutes(
   router: ReturnType<typeof Router>,
-  workspaces: ProjectWorkspaceService | undefined,
-  externalMcp: ExternalMcpRegistry | undefined
+  workspaces: ProjectWorkspaceService | undefined
 ): void {
   router.post("/api/project-workspaces/:id/snapshot", async (req, res) => {
     if (!workspaces)
@@ -66,7 +64,6 @@ export function registerProjectWorkspaceRoutes(
       const path = typeof req.body?.path === "string" ? req.body.path.trim() : ""
       if (!path) return res.status(400).json({ error: "Import path is required." })
       const result = await workspaces.import(path)
-      await externalMcp?.reload(true)
       await timelineRegistry.append({
         type: "project",
         label: "Imported project workspace",

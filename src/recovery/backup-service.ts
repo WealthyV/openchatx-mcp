@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path"
 import { z } from "zod"
 
 import { MCP_CONFIG } from "../config.js"
+import { withExternalMcpConfig } from "../external-mcp/config-transaction.js"
 import { redactSecrets, redactText } from "../security/redact.js"
 import { loadOperationalState, OPERATIONAL_STATE_VERSION } from "./operational-state.js"
 
@@ -24,7 +25,9 @@ export class BackupService {
     const files: Record<string, string> = {}
     for (const entry of this.backupEntries()) {
       try {
-        const content = await readFile(entry.path, "utf8")
+        const content = await withBackupFile(entry.name, entry.path, (configPath) =>
+          readFile(configPath, "utf8")
+        )
         files[entry.name] = redactFileContent(content)
       } catch (error) {
         if (!isEnoent(error)) throw error
@@ -68,9 +71,11 @@ export class BackupService {
     for (const [name, serialized] of Object.entries(backup.files)) {
       const destination = allowed.get(name)
       if (!destination) continue
-      await mkdir(dirname(destination), { recursive: true, mode: 0o700 })
-      await writeFile(destination, serialized.endsWith("\n") ? serialized : `${serialized}\n`, {
-        mode: 0o600,
+      await withBackupFile(name, destination, async (configPath) => {
+        await mkdir(dirname(configPath), { recursive: true, mode: 0o700 })
+        await writeFile(configPath, serialized.endsWith("\n") ? serialized : `${serialized}\n`, {
+          mode: 0o600,
+        })
       })
       restored.push(name)
     }
@@ -84,6 +89,14 @@ export class BackupService {
       { name: "openchatx.toml.json", path: MCP_CONFIG.publicConfigFile },
     ]
   }
+}
+
+function withBackupFile<T>(
+  name: string,
+  path: string,
+  operation: (path: string) => Promise<T>
+): Promise<T> {
+  return name === "mcp-servers.json" ? withExternalMcpConfig(path, operation) : operation(path)
 }
 
 function redactFileContent(content: string): string {

@@ -5,7 +5,11 @@ import { static as expressStatic, Router } from "express"
 import type { CapabilityRegistry } from "../capabilities/catalog.js"
 import type { CapabilityHealthService } from "../capabilities/health.js"
 import { MCP_CONFIG } from "../config.js"
-import { loadExternalMcpConfig, saveExternalMcpConfig } from "../external-mcp/config.js"
+import { loadExternalMcpConfig } from "../external-mcp/config.js"
+import {
+  updateExternalMcpConfig,
+  withExternalMcpConfig,
+} from "../external-mcp/config-transaction.js"
 import type { ExternalMcpRegistry } from "../external-mcp/registry.js"
 import { registerJobRoutes } from "../jobs/dashboard-routes.js"
 import type { JobManager } from "../jobs/job-manager.js"
@@ -97,7 +101,7 @@ export function createDashboardRouter(
   registerUpdateRoutes(router)
   registerRecoveryRoutes(router, systemRecovery)
   registerRuntimeControlRoutes(router, runtimeControl, agentObserver, runtimeProcesses)
-  registerProjectWorkspaceRoutes(router, projectWorkspaces, externalMcp)
+  registerProjectWorkspaceRoutes(router, projectWorkspaces)
   registerSessionHistoryRoutes(router, recentWork)
   registerAgentInstructionsRoutes(router)
   registerRuleRoutes(router, toolboxRegistry)
@@ -154,44 +158,7 @@ export function createDashboardRouter(
     res.status(204).end()
   })
 
-  router.get("/api/mcp-servers", (_req, res) => {
-    const servers = loadExternalMcpConfig(MCP_CONFIG.externalMcp.configFile)
-    res.json({
-      servers,
-      authorization: externalMcp?.authorization?.() ?? {},
-      tools: externalMcp?.detectedTools() ?? [],
-    })
-  })
-
-  router.put("/api/mcp-servers", async (req, res) => {
-    try {
-      const servers = saveExternalMcpConfig(MCP_CONFIG.externalMcp.configFile, req.body?.servers)
-      await externalMcp?.reload()
-      res.json({
-        servers,
-        authorization: externalMcp?.authorization?.() ?? {},
-        restartRequired: false,
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      res.status(400).json({ error: message })
-    }
-  })
-
-  router.post("/api/mcp-servers/refresh", async (_req, res) => {
-    try {
-      await externalMcp?.reload(true)
-      const servers = loadExternalMcpConfig(MCP_CONFIG.externalMcp.configFile)
-      res.json({
-        servers,
-        authorization: externalMcp?.authorization?.() ?? {},
-        tools: externalMcp?.detectedTools() ?? [],
-      })
-    } catch (error) {
-      const message = error instanceof Error ? error.message : String(error)
-      res.status(500).json({ error: message })
-    }
-  })
+  registerMcpConfigRoutes(router, externalMcp)
 
   // OAuth initiation/disconnect are user actions, never exposed as agent tools.
   // Reject cross-origin browser requests to avoid drive-by account linking.
@@ -325,6 +292,55 @@ export function createDashboardRouter(
   const dashboardDir = fileURLToPath(new URL("../../ui/dist/", import.meta.url))
   router.use(expressStatic(dashboardDir, { index: "index.html" }))
   return router
+}
+
+function registerMcpConfigRoutes(
+  router: Router,
+  externalMcp: ExternalMcpRegistry | undefined
+): void {
+  const readMcpServers = (path: string) => ({
+    servers: loadExternalMcpConfig(path),
+    authorization: externalMcp?.authorization?.() ?? {},
+    tools: externalMcp?.detectedTools() ?? [],
+  })
+
+  router.get("/api/mcp-servers", async (_req, res) => {
+    res.json(await withExternalMcpConfig(MCP_CONFIG.externalMcp.configFile, readMcpServers))
+  })
+
+  router.put("/api/mcp-servers", async (req, res) => {
+    try {
+      const servers = await updateExternalMcpConfig(
+        MCP_CONFIG.externalMcp.configFile,
+        () => req.body?.servers,
+        externalMcp && ((path) => externalMcp.reload(false, path))
+      )
+      res.json({
+        servers,
+        authorization: externalMcp?.authorization?.() ?? {},
+        restartRequired: false,
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      res.status(400).json({ error: message })
+    }
+  })
+
+  router.post("/api/mcp-servers/refresh", async (_req, res) => {
+    try {
+      const result = await withExternalMcpConfig(
+        MCP_CONFIG.externalMcp.configFile,
+        async (path) => {
+          await externalMcp?.reload(true, path)
+          return readMcpServers(path)
+        }
+      )
+      res.json(result)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      res.status(500).json({ error: message })
+    }
+  })
 }
 
 function registerSubagentSessionRoutes(

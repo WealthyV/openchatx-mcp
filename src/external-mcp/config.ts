@@ -64,7 +64,7 @@ export function loadExternalMcpConfig(path: string): ExternalMcpConfig {
   return parsed.data
 }
 
-export function saveExternalMcpConfig(path: string, value: unknown): ExternalMcpConfig {
+export function parseExternalMcpConfig(value: unknown): ExternalMcpConfig {
   const parsed = externalMcpConfigSchema.safeParse(value)
   if (!parsed.success) {
     const details = parsed.error.issues
@@ -72,9 +72,12 @@ export function saveExternalMcpConfig(path: string, value: unknown): ExternalMcp
       .join("; ")
     throw new Error(`Invalid external MCP config: ${details}`)
   }
-  writeFileSync(path, `${JSON.stringify(parsed.data, null, 2)}\n`, {
+  return parsed.data
+}
+
+export function writeExternalMcpConfig(path: string, contents: string | Buffer): void {
+  writeFileSync(path, contents, {
     encoding: "utf8",
     mode: 0o600,
   })
-  return parsed.data
 }

@@ -6,8 +6,11 @@ import {
   type ExternalMcpConfig,
   type ExternalMcpServerConfig,
   loadExternalMcpConfig,
-  saveExternalMcpConfig,
 } from "../../external-mcp/config.js"
+import {
+  updateExternalMcpConfig,
+  withExternalMcpConfig,
+} from "../../external-mcp/config-transaction.js"
 import type { ExternalMcpRegistry } from "../../external-mcp/registry.js"
 import { toToolError } from "../../mcp/tool-error.js"
 
@@ -47,9 +50,8 @@ export function registerMcpServerManagementTools(
     },
     async () => {
       try {
-        const config = loadExternalMcpConfig(
-          typeof configPath === "function" ? configPath() : configPath
-        )
+        const path = typeof configPath === "function" ? configPath() : configPath
+        const config = await withExternalMcpConfig(path, loadExternalMcpConfig)
         return {
           structuredContent: { servers: redactConfig(config) },
           content: [],
@@ -76,10 +78,11 @@ export function registerMcpServerManagementTools(
     async (input) => {
       try {
         const path = typeof configPath === "function" ? configPath() : configPath
-        const current = loadExternalMcpConfig(path)
-        const next = applyAction(current, input)
-        const saved = saveExternalMcpConfig(path, next)
-        await registry?.reload()
+        const saved = await updateExternalMcpConfig(
+          path,
+          (canonicalPath) => applyAction(loadExternalMcpConfig(canonicalPath), input),
+          registry && ((canonicalPath) => registry.reload(false, canonicalPath))
+        )
         return {
           structuredContent: {
             ok: true,
