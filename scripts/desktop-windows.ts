@@ -407,12 +407,8 @@ async function createPortableZip(): Promise<void> {
 async function extractZip(archive: string, destination: string): Promise<void> {
   await mkdir(destination, { recursive: true })
   if (process.platform === "win32") {
-    run("powershell.exe", [
-      "-NoLogo",
-      "-NoProfile",
-      "-Command",
-      `Expand-Archive -LiteralPath ${psQuote(archive)} -DestinationPath ${psQuote(destination)} -Force`,
-    ])
+    // Windows ships bsdtar; avoid Expand-Archive's runtime-dependent .NET overloads.
+    run("tar.exe", ["-xf", archive, "-C", destination])
     return
   }
   run("unzip", ["-q", "-o", archive, "-d", destination])

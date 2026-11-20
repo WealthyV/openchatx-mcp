@@ -29,6 +29,10 @@
 - 舊設定檔中的 `tailnet_ui.ip` 會被忽略，後續儲存時自動移除；不需要使用者遷移。
 - 新版桌面 App 需由使用者自行重新啟動後才會套用，安裝時不強制停止既有執行程序。
 
+### 遠端建置修復
+
+- 修正 Windows CI 的 ZIP 解壓縮流程，改用系統內建 `tar.exe`，避免 PowerShell `Expand-Archive` 在特定執行環境發生 .NET 方法相容性錯誤。
+
 ## 注意事項
 
 - 手機與 Mac 均須連線至同一個 Tailscale tailnet，且 tailnet 存取控制須允許連線。
