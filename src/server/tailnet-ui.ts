@@ -42,26 +42,48 @@ const defaultCli: TailnetCli = {
       candidates = ["tailscale.exe", "C:\\Program Files\\Tailscale\\tailscale.exe"]
     else if (process.platform === "darwin")
       candidates = [
-        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
         "/opt/homebrew/bin/tailscale",
         "/usr/local/bin/tailscale",
+        "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
       ]
     else candidates = ["tailscale"]
+    let lastError: Error | undefined
     for (const binary of candidates) {
       try {
-        return execFileSync(binary, args, {
+        const output = execFileSync(binary, args, {
           encoding: "utf8",
           timeout: 10_000,
           maxBuffer: 1024 * 1024,
         }).trim()
+        // A macOS GUI executable can report a failure with exit status 0.
+        if (!isExpectedCliOutput(args, output)) {
+          lastError = new Error(
+            `Tailscale CLI (${binary}) returned unexpected output for ${args.join(" ")}: ${output.slice(0, 256)}`
+          )
+          continue
+        }
+        return output
       } catch (error) {
         if (error instanceof Error && "code" in error && error.code === "ENOENT") continue
         const message = error instanceof Error ? error.message : String(error)
-        throw new Error(`Tailscale CLI failed: ${message}`, { cause: error })
+        lastError = new Error(`Tailscale CLI failed (${binary}): ${message}`, { cause: error })
       }
     }
-    throw new Error("Tailscale CLI not found. Install and connect Tailscale first.")
+    throw lastError ?? new Error("Tailscale CLI not found. Install and connect Tailscale first.")
   },
+}
+
+function isExpectedCliOutput(args: string[], output: string): boolean {
+  if (args[0] === "ip" && args[1] === "-4") return isTailnetIPv4(output)
+  if (args[0] === "serve" && args[1] === "status" && args[2] === "--json") {
+    try {
+      JSON.parse(output)
+      return true
+    } catch {
+      return false
+    }
+  }
+  return true
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -163,26 +185,33 @@ export class TailnetUiManager {
       await this.disable()
       return
     }
-    if (!isTailnetIPv4(settings.ip))
-      throw new Error("Enter this Mac's Tailscale IPv4 address (100.64.0.0/10).")
     const ownIP = this.cli.run(settings, ["ip", "-4"]).trim()
-    if (ownIP !== settings.ip)
-      throw new Error(`Tailscale IP mismatch: this Mac has ${ownIP}, not ${settings.ip}.`)
+    if (!isTailnetIPv4(ownIP))
+      throw new Error(`Could not detect a valid local Tailscale IPv4 address: ${ownIP}`)
 
     const stored = this.active?.record ?? this.readRecord()
     const forward = this.currentForward(settings)
-    if (forward && (stored?.port !== this.port || stored.target !== forward))
+    // An older OpenChatX setup forwarded the Tailnet port straight to its
+    // localhost runtime. Adopt only that exact legacy target, never an
+    // unrelated forward, and replace it with the restricted /ui proxy.
+    const legacyRuntimeTarget = `127.0.0.1:${this.port}`
+    if (
+      forward &&
+      forward !== legacyRuntimeTarget &&
+      (stored?.port !== this.port || stored.target !== forward)
+    )
       throw new Error(
         `Tailscale Serve port ${this.port} is already used by another service. No changes made.`
       )
     if (
       this.active &&
       JSON.stringify(this.active.settings) === JSON.stringify(settings) &&
+      this.active.record.ip === ownIP &&
       forward === this.active.record.target
     )
       return
 
-    const server = createTailnetUiProxy(settings.ip, this.port)
+    const server = createTailnetUiProxy(ownIP, this.port)
     try {
       const localPort = await new Promise<number>((resolve, reject) => {
         server.once("error", reject)
@@ -202,7 +231,7 @@ export class TailnetUiManager {
         const record: OwnedForward = {
           port: this.port,
           target,
-          ip: settings.ip,
+          ip: ownIP,
           cli_path: settings.cli_path,
           socket_path: settings.socket_path,
         }

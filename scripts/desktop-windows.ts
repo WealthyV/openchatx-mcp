@@ -291,7 +291,6 @@ async function writeWindowsDesktopConfig(destination: string): Promise<void> {
       "",
       "[tailnet_ui]",
       "enabled = false",
-      'ip = ""',
       'cli_path = ""',
       'socket_path = ""',
       "",

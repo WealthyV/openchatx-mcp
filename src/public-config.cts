@@ -25,7 +25,6 @@ const publicConfigSchema = z.object({
   }),
   tailnet_ui: z.object({
     enabled: z.boolean().default(false),
-    ip: z.string().trim().default(""),
     cli_path: z.string().trim().default(""),
     socket_path: z.string().trim().default(""),
   }),
@@ -107,7 +106,8 @@ function resolveConfigObject(
 ): Record<string, unknown> {
   const input = resolveConfigInput(value, prefix, warn)
   for (const key of Object.keys(input)) {
-    if (!Object.hasOwn(schema.shape, key))
+    // Older configurations included a manually entered IP; it is now auto-detected.
+    if (!Object.hasOwn(schema.shape, key) && !(prefix === "tailnet_ui" && key === "ip"))
       warn(`Unknown setting ${prefix ? `${prefix}.` : ""}${key}; ignoring it.`)
   }
 

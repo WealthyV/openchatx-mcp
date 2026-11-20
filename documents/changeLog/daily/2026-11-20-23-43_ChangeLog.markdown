@@ -1,0 +1,35 @@
+# 更新紀錄：2026-11-20 23:43
+
+## 摘要
+
+將 OpenChatX 版本提升至 1.4.2，修正 Tailscale 私人網路 UI 存取的自動偵測與既有轉送規則相容性，讓手機在不同 Wi-Fi 網路下透過 Tailscale 存取 OpenChatX UI。
+
+## 影響範圍
+
+- 後端：Tailscale CLI 偵測、私人 UI Proxy、轉送規則管理及設定檔。
+- 前端：設定頁、型別及多語系提示。
+- 桌面：macOS、Windows 預設設定與套件版本。
+- 測試：Tailscale 存取、舊設定及既有轉送規則的回歸測試。
+
+## 變更內容
+
+### 調整
+
+- 啟用私人 UI 存取時自動取得本機 Tailscale IPv4，不再要求手動填寫或保存 IP；Tailscale IP 改變後可重新設定代理。
+- macOS 優先使用命令列版 Tailscale，避免將圖形介面的錯誤訊息誤認為 IP。
+- 允許接管舊版 OpenChatX 直接轉送至本機 Runtime 的同埠規則，改由限制存取路徑的 UI Proxy 提供服務；其他目標的轉送仍不會被覆蓋。
+
+### 修正
+
+- 修正已連線 Tailscale 卻出現 IP 不一致的誤判，以及舊版 8001 轉送規則阻止安全 UI Proxy 啟用的問題。
+- 保持私人 UI 入口僅能存取 `/ui`，不開放 `/mcp`。
+
+## 相容性與遷移
+
+- 舊設定檔中的 `tailnet_ui.ip` 會被忽略，後續儲存時自動移除；不需要使用者遷移。
+- 新版桌面 App 需由使用者自行重新啟動後才會套用，安裝時不強制停止既有執行程序。
+
+## 注意事項
+
+- 手機與 Mac 均須連線至同一個 Tailscale tailnet，且 tailnet 存取控制須允許連線。
+- 本次未變更既有其他服務的 Tailscale Serve 規則。

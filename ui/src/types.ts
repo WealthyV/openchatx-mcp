@@ -64,7 +64,6 @@ export interface RuntimeSettings {
   }
   tailnet_ui: {
     enabled: boolean
-    ip: string
     cli_path: string
     socket_path: string
   }

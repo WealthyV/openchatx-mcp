@@ -74,9 +74,8 @@ export const ja: Messages = {
   "settings.tailnetUi.description":
     "Tailscale は利用者がインストール・接続します。OpenChatX はプライベートな UI 入口のみ作成します。",
   "settings.tailnetUi.enabled": "Tailnet 内の UI アクセスを有効にする",
-  "settings.tailnetUi.ip": "このコンピューターの Tailscale IPv4",
   "settings.tailnetUi.ipHint":
-    "この Mac の 100.x アドレスを入力します。スマートフォンも同じ tailnet に参加してください。",
+    "有効にすると、このコンピューターの Tailscale IPv4 を自動検出します。スマートフォンも同じ tailnet に参加してください。",
   "settings.tailnetUi.advanced": "詳細：Tailscale CLI と Socket",
   "settings.tailnetUi.cli": "Tailscale CLI パス（空欄なら自動検索）",
   "settings.tailnetUi.socket": "Tailscale Socket パス（空欄なら標準設定）",

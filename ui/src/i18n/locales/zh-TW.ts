@@ -73,9 +73,8 @@ export const zhTW: Messages = {
   "settings.tailnetUi.description":
     "先自行安裝並連線 Tailscale，再由 OpenChatX 建立私人網路內的 UI 入口。此功能不會安裝或登入 Tailscale。",
   "settings.tailnetUi.enabled": "啟用私人網路 UI 存取",
-  "settings.tailnetUi.ip": "這台電腦的 Tailscale IPv4",
   "settings.tailnetUi.ipHint":
-    "輸入這台 Mac 在 Tailscale 中的 100.x IP；手機需加入同一個 tailnet。",
+    "啟用後會自動偵測這台電腦的 Tailscale IPv4，無需手動輸入；手機需加入同一個 tailnet。",
   "settings.tailnetUi.advanced": "進階：Tailscale CLI 與 Socket",
   "settings.tailnetUi.cli": "Tailscale CLI 路徑（留空自動尋找）",
   "settings.tailnetUi.socket": "Tailscale Socket 路徑（留空使用預設）",

@@ -12,18 +12,19 @@ import {
   type TailnetUiSettings,
 } from "../src/server/tailnet-ui.js"
 
+const TEST_IP = "100.82.192.72"
 const baseConfig: TailnetUiSettings = {
   enabled: true,
-  ip: "100.82.192.72",
   cli_path: "",
   socket_path: "",
 }
 
 function mockTailscale(existing?: string) {
   let forward = existing
+  let ip = TEST_IP
   const cli: TailnetCli = {
     run(_settings, args) {
-      if (args.join(" ") === "ip -4") return baseConfig.ip
+      if (args.join(" ") === "ip -4") return ip
       if (args.join(" ") === "serve status --json")
         return JSON.stringify(forward ? { TCP: { 8001: { TCPForward: forward } } } : {})
       if (args[0] === "serve" && args[1] === "--tcp=8001" && args[2] === "off") {
@@ -40,6 +41,9 @@ function mockTailscale(existing?: string) {
   return {
     cli,
     current: () => forward,
+    setIP: (next: string) => {
+      ip = next
+    },
     drop: () => {
       forward = undefined
     },
@@ -85,7 +89,7 @@ test("private UI proxy allows its own UI but denies MCP, other Hosts, and cross-
   const upstreamAddress = upstream.address()
   if (!upstreamAddress || typeof upstreamAddress === "string") throw new Error("No upstream port")
   const port = upstreamAddress.port
-  const proxy = createTailnetUiProxy(baseConfig.ip, port)
+  const proxy = createTailnetUiProxy(TEST_IP, port)
   await new Promise<void>((resolve) => proxy.listen(0, "127.0.0.1", resolve))
   t.after(async () => {
     proxy.closeAllConnections()
@@ -98,7 +102,7 @@ test("private UI proxy allows its own UI but denies MCP, other Hosts, and cross-
   const proxyAddress = proxy.address()
   if (!proxyAddress || typeof proxyAddress === "string") throw new Error("No proxy port")
   const endpoint = `http://127.0.0.1:${proxyAddress.port}`
-  const host = `${baseConfig.ip}:${port}`
+  const host = `${TEST_IP}:${port}`
 
   const allowed = await probe(`${endpoint}/ui/api/settings`, host)
   assert.equal(allowed.status, 200, allowed.data)
@@ -129,7 +133,9 @@ test("manager owns only its Tailscale forward and removes it when switched off",
   const manager = new TailnetUiManager(8001, root, tailscale.cli)
   await manager.apply(baseConfig)
   assert.match(tailscale.current() ?? "", /^127\.0\.0\.1:\d+$/u)
-  assert.equal(JSON.parse(await readFile(join(root, "tailnet-ui-forward.json"), "utf8")).port, 8001)
+  const record = JSON.parse(await readFile(join(root, "tailnet-ui-forward.json"), "utf8"))
+  assert.equal(record.port, 8001)
+  assert.equal(record.ip, TEST_IP)
   await manager.apply({ ...baseConfig, enabled: false })
   assert.equal(tailscale.current(), undefined)
   await assert.rejects(readFile(join(root, "tailnet-ui-forward.json"), "utf8"), /ENOENT/u)
@@ -170,6 +176,50 @@ test("reconciliation restores the forward after Tailscale drops its Serve state"
   await manager.apply(baseConfig)
   assert.match(tailscale.current() ?? "", /^127\.0\.0\.1:\d+$/u)
   await manager.apply({ ...baseConfig, enabled: false })
+  await manager.close()
+})
+
+test("manager reconfigures the proxy when the auto-detected Tailnet IP changes", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-tailnet-ip-change-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const tailscale = mockTailscale()
+  const manager = new TailnetUiManager(8001, root, tailscale.cli)
+  await manager.apply(baseConfig)
+  const previousTarget = tailscale.current()
+  tailscale.setIP("100.90.1.2")
+  await manager.apply(baseConfig)
+  assert.notEqual(tailscale.current(), previousTarget)
+  assert.equal(
+    JSON.parse(await readFile(join(root, "tailnet-ui-forward.json"), "utf8")).ip,
+    "100.90.1.2"
+  )
+  await manager.apply({ ...baseConfig, enabled: false })
+  await manager.close()
+})
+
+test("manager rejects CLI error text rather than treating it as an IP", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-tailnet-invalid-cli-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const manager = new TailnetUiManager(8001, root, {
+    run() {
+      return "The Tailscale GUI failed to start: Tailscale.CLIError error 3"
+    },
+  })
+  await assert.rejects(manager.apply(baseConfig), /Could not detect a valid local Tailscale IPv4/u)
+  await assert.rejects(readFile(join(root, "tailnet-ui-forward.json"), "utf8"), /ENOENT/u)
+  await manager.close()
+})
+
+test("manager adopts a legacy direct forward to its own runtime", async (t) => {
+  const root = await mkdtemp(join(tmpdir(), "openchatx-tailnet-legacy-forward-"))
+  t.after(() => rm(root, { recursive: true, force: true }))
+  const tailscale = mockTailscale("127.0.0.1:8001")
+  const manager = new TailnetUiManager(8001, root, tailscale.cli)
+  await manager.apply(baseConfig)
+  assert.match(tailscale.current() ?? "", /^127\.0\.0\.1:\d+$/u)
+  assert.notEqual(tailscale.current(), "127.0.0.1:8001")
+  await manager.apply({ ...baseConfig, enabled: false })
+  assert.equal(tailscale.current(), undefined)
   await manager.close()
 })
 

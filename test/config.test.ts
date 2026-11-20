@@ -45,7 +45,7 @@ test("loads and validates OpenChatX TOML config", async (t) => {
     port: 8001,
     shell: { path: "/bin/zsh", rtk: false },
     tunnel: { profile: "personal", health_port: 8181 },
-    tailnet_ui: { enabled: false, ip: "", cli_path: "", socket_path: "" },
+    tailnet_ui: { enabled: false, cli_path: "", socket_path: "" },
     dot: {
       enabled: false,
       port: 8002,
@@ -82,6 +82,18 @@ test("loads older partial configs with defaults and preserves valid overrides", 
   assert.deepEqual(loaded.tools, { ...DEFAULT_PUBLIC_CONFIG.tools, web: false })
   assert.equal(warning.mock.callCount(), 0)
   assert.equal(await readFile(path, "utf8"), source)
+})
+
+test("ignores a legacy manually configured Tailnet IP and removes it on save", async (t) => {
+  const root = await tempDir(t, "openchatx-tailnet-legacy-ip-")
+  const path = join(root, "config.toml")
+  await writeFile(path, '[tailnet_ui]\nenabled = true\nip = "100.111.210.98"\n')
+  const warning = t.mock.method(console, "warn", () => undefined)
+  const config = loadPublicConfig(path)
+  assert.deepEqual(config.tailnet_ui, { enabled: true, cli_path: "", socket_path: "" })
+  assert.equal(warning.mock.callCount(), 0)
+  savePublicConfig(config, path)
+  assert.doesNotMatch(await readFile(path, "utf8"), /^ip\s*=/mu)
 })
 
 test("warns for invalid or unknown settings without discarding valid siblings", async (t) => {

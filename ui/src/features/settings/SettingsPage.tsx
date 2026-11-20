@@ -457,19 +457,7 @@ function GeneralSettingsPage({
               }
             />
           </label>
-          <Field label={t("settings.tailnetUi.ip")} hint={t("settings.tailnetUi.ipHint")}>
-            <input
-              className={INPUT_CLASS}
-              placeholder="100.82.192.72"
-              value={settings.tailnet_ui.ip}
-              onChange={(event) =>
-                setSettings({
-                  ...settings,
-                  tailnet_ui: { ...settings.tailnet_ui, ip: event.target.value },
-                })
-              }
-            />
-          </Field>
+          <p className="text-xs text-muted-foreground">{t("settings.tailnetUi.ipHint")}</p>
           <p className="text-xs text-muted-foreground">{t("settings.tailnetUi.security")}</p>
         </CardContent>
       </Card>

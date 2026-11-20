@@ -74,9 +74,8 @@ export const ru = {
   "settings.tailnetUi.description":
     "Установите и подключите Tailscale самостоятельно. OpenChatX создаёт только частный доступ к UI.",
   "settings.tailnetUi.enabled": "Разрешить UI через Tailnet",
-  "settings.tailnetUi.ip": "Tailscale IPv4 этого компьютера",
   "settings.tailnetUi.ipHint":
-    "Введите адрес 100.x этого Mac. Телефон должен быть в той же сети tailnet.",
+    "После включения OpenChatX автоматически определит Tailscale IPv4 этого компьютера. Телефон должен быть в той же сети tailnet.",
   "settings.tailnetUi.advanced": "Дополнительно: CLI и Socket Tailscale",
   "settings.tailnetUi.cli": "Путь к CLI Tailscale (пусто — авто)",
   "settings.tailnetUi.socket": "Путь к сокету Tailscale (пусто — стандартный)",
