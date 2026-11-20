@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto"
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import process from "node:process"
 
 import { z } from "zod"
@@ -28,10 +28,31 @@ const stateSchema = z.object({
   approvals: z.array(approvalSchema).default([]),
 })
 
+// Share a lightweight queue between Store instances in this process. One
+// runtime may instantiate separate facades for the same approvals.json.
+const mutationsByPath = new Map<string, Promise<void>>()
+
 export class ApprovalStore {
-  private readonly path = join(MCP_CONFIG.stateDir, "approvals.json")
+  constructor(private readonly path = join(MCP_CONFIG.stateDir, "approvals.json")) {}
+
+  private async serialize<T>(action: () => Promise<T>): Promise<T> {
+    const key = resolve(this.path)
+    const previous = mutationsByPath.get(key) ?? Promise.resolve()
+    const pending = previous.then(action, action)
+    const finished = pending.then(
+      () => undefined,
+      () => undefined
+    )
+    mutationsByPath.set(key, finished)
+    try {
+      return await pending
+    } finally {
+      if (mutationsByPath.get(key) === finished) mutationsByPath.delete(key)
+    }
+  }
 
   async list(): Promise<RuntimeApproval[]> {
+    await mutationsByPath.get(resolve(this.path))
     return (await this.load()).approvals
       .filter((approval) => approval.status === "pending")
       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
@@ -45,43 +66,47 @@ export class ApprovalStore {
     sessionId?: string
     source?: { kind: "builtin" | "toolbox" | "mcp"; id?: string }
   }): Promise<RuntimeApproval> {
-    const state = await this.load()
-    const fingerprint = approvalFingerprint(input.toolName, input.argumentsValue, input.category)
-    const existing = state.approvals.find(
-      (candidate) =>
-        candidate.fingerprint === fingerprint &&
-        candidate.sessionId === input.sessionId &&
-        candidate.status === "pending"
-    )
-    if (existing) return existing
+    return this.serialize(async () => {
+      const state = await this.load()
+      const fingerprint = approvalFingerprint(input.toolName, input.argumentsValue, input.category)
+      const existing = state.approvals.find(
+        (candidate) =>
+          candidate.fingerprint === fingerprint &&
+          candidate.sessionId === input.sessionId &&
+          candidate.status === "pending"
+      )
+      if (existing) return existing
 
-    const approval: RuntimeApproval = {
-      id: randomUUID(),
-      fingerprint,
-      toolName: input.toolName,
-      category: input.category,
-      reason: input.reason,
-      createdAt: new Date().toISOString(),
-      status: "pending",
-      ...(input.sessionId ? { sessionId: input.sessionId } : {}),
-      input: redactSecrets(input.argumentsValue),
-      ...(input.source ? { source: input.source } : {}),
-    }
-    state.approvals.push(approval)
-    await this.save(state)
-    return approval
+      const approval: RuntimeApproval = {
+        id: randomUUID(),
+        fingerprint,
+        toolName: input.toolName,
+        category: input.category,
+        reason: input.reason,
+        createdAt: new Date().toISOString(),
+        status: "pending",
+        ...(input.sessionId ? { sessionId: input.sessionId } : {}),
+        input: redactSecrets(input.argumentsValue),
+        ...(input.source ? { source: input.source } : {}),
+      }
+      state.approvals.push(approval)
+      await this.save(state)
+      return approval
+    })
   }
 
   async decide(id: string, decision: "approve" | "deny" | "dismiss"): Promise<RuntimeApproval> {
-    const state = await this.load()
-    const approval = state.approvals.find((candidate) => candidate.id === id)
-    if (!approval) throw new Error(`Unknown approval ${JSON.stringify(id)}.`)
-    if (approval.status !== "pending") return approval
-    if (decision === "approve") approval.status = "approved"
-    else if (decision === "deny") approval.status = "denied"
-    else approval.status = "consumed"
-    await this.save(state)
-    return approval
+    return this.serialize(async () => {
+      const state = await this.load()
+      const approval = state.approvals.find((candidate) => candidate.id === id)
+      if (!approval) throw new Error(`Unknown approval ${JSON.stringify(id)}.`)
+      if (approval.status !== "pending") return approval
+      if (decision === "approve") approval.status = "approved"
+      else if (decision === "deny") approval.status = "denied"
+      else approval.status = "consumed"
+      await this.save(state)
+      return approval
+    })
   }
 
   async isApproved(
@@ -90,33 +115,37 @@ export class ApprovalStore {
     category: string,
     inheritedSessions: readonly string[] = []
   ): Promise<boolean> {
-    const state = await this.load()
-    const fingerprint = approvalFingerprint(toolName, argumentsValue, category)
-    const approval = state.approvals.find(
-      (candidate) =>
-        candidate.fingerprint === fingerprint &&
-        (candidate.sessionId
-          ? inheritedSessions.includes(candidate.sessionId)
-          : inheritedSessions.length === 0) &&
-        (candidate.status === "approved" || candidate.status === "approved-once")
-    )
-    if (!approval) return false
-    if (approval.status === "approved-once") {
-      approval.status = "approved"
-      await this.save(state)
-    }
-    return true
+    return this.serialize(async () => {
+      const state = await this.load()
+      const fingerprint = approvalFingerprint(toolName, argumentsValue, category)
+      const approval = state.approvals.find(
+        (candidate) =>
+          candidate.fingerprint === fingerprint &&
+          (candidate.sessionId
+            ? inheritedSessions.includes(candidate.sessionId)
+            : inheritedSessions.length === 0) &&
+          (candidate.status === "approved" || candidate.status === "approved-once")
+      )
+      if (!approval) return false
+      if (approval.status === "approved-once") {
+        approval.status = "approved"
+        await this.save(state)
+      }
+      return true
+    })
   }
 
   async clearSettled(): Promise<void> {
-    const state = await this.load()
-    state.approvals = state.approvals.filter(
-      (approval) =>
-        approval.status === "pending" ||
-        approval.status === "approved" ||
-        approval.status === "approved-once"
-    )
-    await this.save(state)
+    return this.serialize(async () => {
+      const state = await this.load()
+      state.approvals = state.approvals.filter(
+        (approval) =>
+          approval.status === "pending" ||
+          approval.status === "approved" ||
+          approval.status === "approved-once"
+      )
+      await this.save(state)
+    })
   }
 
   private async load(): Promise<z.infer<typeof stateSchema>> {
@@ -132,7 +161,7 @@ export class ApprovalStore {
   private async save(state: z.infer<typeof stateSchema>): Promise<void> {
     const validated = stateSchema.parse(state)
     await mkdir(dirname(this.path), { recursive: true, mode: 0o700 })
-    const temporary = `${this.path}.tmp-${process.pid}-${Date.now()}`
+    const temporary = `${this.path}.tmp-${process.pid}-${randomUUID()}`
     await writeFile(temporary, `${JSON.stringify(validated, null, 2)}\n`, { mode: 0o600 })
     await rename(temporary, this.path)
   }
