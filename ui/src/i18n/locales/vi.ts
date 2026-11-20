@@ -78,7 +78,8 @@ export const vi = {
   "settings.tailnetUi.description":
     "Tự cài đặt và kết nối Tailscale. OpenChatX chỉ tạo cổng UI riêng tư.",
   "settings.tailnetUi.enabled": "Bật truy cập UI qua Tailnet",
-  "settings.tailnetUi.ipHint": "OpenChatX tự phát hiện địa chỉ IPv4 Tailscale của máy khi bật. Điện thoại phải cùng tailnet.",
+  "settings.tailnetUi.ipHint":
+    "OpenChatX tự phát hiện địa chỉ IPv4 Tailscale của máy khi bật. Điện thoại phải cùng tailnet.",
   "settings.tailnetUi.advanced": "Nâng cao: CLI và socket Tailscale",
   "settings.tailnetUi.cli": "Đường dẫn CLI Tailscale (trống để tự tìm)",
   "settings.tailnetUi.socket": "Đường dẫn socket Tailscale (trống để mặc định)",
