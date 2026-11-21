@@ -1,0 +1,30 @@
+# OpenChatX 1.4.2 — Release Notes
+
+## 摘要
+
+1.4.2 聚焦於手機透過 Tailscale 存取 OpenChatX UI、MCP 設定變更可靠性，以及桌面端與 Subagent 工作階段的穩定性。手機與 Mac 位於不同 Wi-Fi 時，只要兩者加入同一個 Tailscale tailnet，即可透過 Mac 的 Tailscale IP 與原本的 Runtime 埠存取 `/ui/`，不必手動輸入 Tailscale IP。
+
+## Fixed
+
+- **Tailscale 私人 UI 存取**：自動偵測本機 Tailscale IPv4，修正將 Tailscale GUI 錯誤輸出誤判為 IP 的情況；IP 變更後會重新設定代理。若 8001 已有舊版 OpenChatX 指向本機同埠 Runtime 的轉送規則，可由受限 UI Proxy 接管，其他服務的規則不會被覆蓋。私人入口只開放 `/ui`，不開放 `/mcp`。
+- **MCP 設定失敗回復**：修正外部 MCP 重新載入失敗時的設定回復、設定檔符號連結路徑變更與並行更新競態問題，避免覆蓋其他已完成的設定修改。整合 [#38](https://github.com/WealthyV/openchatx-mcp/pull/38)、[#40](https://github.com/WealthyV/openchatx-mcp/pull/40)。
+- **Subagent 工作階段**：修正刪除工作階段後列表與觀察狀態未同步的問題。
+- **Windows 診斷資料匯出**：修正診斷資料下載流程。
+- **Windows 安裝包建置**：改用 Windows 內建 `tar.exe` 解壓縮 ZIP，避免部分 PowerShell 環境的 `Expand-Archive` 相容性問題。
+
+## Changed
+
+- **簡化 Tailscale 設定**：移除手動輸入 IP 欄位，並更新繁體中文、英文、日文、俄文與越南文提示。
+- **設定檔相容性**：舊版 `tailnet_ui.ip` 欄位會被忽略，儲存設定時自動移除，不需要手動遷移。
+
+## 升級注意事項
+
+- 手機與 Mac 均須安裝並連線至同一個 Tailscale tailnet，且 tailnet 存取規則允許連線。
+- 若在桌面 App 執行期間替換安裝檔，需自行重新開啟 App 才會套用新版。
+- 既有 OpenChatX 使用者設定與其他 Tailscale Serve 服務不需要重設。
+
+## 版本資訊
+
+- Version: 1.4.2
+- Base: v1.4.1
+- Platforms: macOS arm64 / x64、Windows arm64 / x64
