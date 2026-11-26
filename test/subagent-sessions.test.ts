@@ -507,6 +507,8 @@ test("Subagent sessions perform real tool calls, recursively delegate and accept
   // Steering reuses the same slot, even if the original work has finished.
   assert.equal(runtime.steerSession(slotA.job_id, "continue", "slot-owner").job_id, slotA.job_id)
   assert.equal(runtime.deleteSession(slotA.job_id, "slot-owner"), 1)
+  assert.equal(runtime.deleteSession(slotA.job_id), 0)
+  assert.throws(() => runtime.deleteSession(slotA.job_id, "slot-owner"), /Unknown subagent/u)
   const replacement = runWithAgent("slot-owner", () =>
     runtime.startAsync({ profileId: "fixture", task: "child" }, "slot-owner")
   )

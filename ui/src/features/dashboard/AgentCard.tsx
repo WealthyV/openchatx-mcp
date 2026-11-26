@@ -9,7 +9,7 @@ import {
   Trash2,
   TriangleAlert,
 } from "lucide-react"
-import { useState } from "react"
+import { useEffect, useState } from "react"
 
 import { Badge } from "../../components/ui/badge"
 import { Button } from "../../components/ui/button"
@@ -37,7 +37,7 @@ export function AgentCard({
   showContextLimit?: boolean
 }) {
   const { t, locale } = useI18n()
-  const [selectedCallId, setSelectedCallId] = useState<string>()
+  const [selectedCallSnapshot, setSelectedCallSnapshot] = useState<AgentCall>()
   const [deleting, setDeleting] = useState(false)
   const [deleteDialogOpen, setDeleteDialogOpen] = useState(false)
   const [deleteError, setDeleteError] = useState<string>()
@@ -47,7 +47,12 @@ export function AgentCard({
   const [limitError, setLimitError] = useState<string>()
   const active = now - agent.lastSeenAt < 30_000
   const recent = [agent.current, ...agent.recent].filter((call): call is AgentCall => Boolean(call))
-  const selectedCall = recent.find((call) => call.id === selectedCallId)
+  // Keep the open detail readable even when a newer tool call evicts it from the recent list.
+  const selectedCall =
+    recent.find((call) => call.id === selectedCallSnapshot?.id) ?? selectedCallSnapshot
+  useEffect(() => {
+    if (selectedCall && selectedCall !== selectedCallSnapshot) setSelectedCallSnapshot(selectedCall)
+  }, [selectedCall, selectedCallSnapshot])
 
   async function remove() {
     if (deleting) return
@@ -191,7 +196,7 @@ export function AgentCard({
               <ActivityRow
                 key={call.id}
                 call={call}
-                onClick={() => setSelectedCallId(call.id)}
+                onClick={() => setSelectedCallSnapshot(call)}
                 onStop={call.status === "running" ? () => void stopCall(call) : undefined}
                 stopping={stoppingCallId === call.id}
                 locale={locale}
@@ -248,7 +253,7 @@ export function AgentCard({
         {limitError ? <div className="text-xs text-destructive">{limitError}</div> : null}
         <SteerComposer agent={agent} />
       </CardContent>
-      <ToolCallModal call={selectedCall} onClose={() => setSelectedCallId(undefined)} />
+      <ToolCallModal call={selectedCall} onClose={() => setSelectedCallSnapshot(undefined)} />
       <ConfirmDialog
         open={deleteDialogOpen}
         onOpenChange={setDeleteDialogOpen}

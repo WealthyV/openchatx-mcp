@@ -34,6 +34,7 @@ import {
   stopSubagentSession,
   subagentExportUrl,
 } from "../../lib/api"
+import { createRefresh } from "../../lib/refresh"
 import type {
   SubagentSessionDetail,
   SubagentSessionEvent,
@@ -68,20 +69,24 @@ export function SubagentActivity({
   const [draft, setDraft] = useState("")
   const [sending, setSending] = useState(false)
   const [deleting, setDeleting] = useState(false)
-  const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<string>()
   const [stopping, setStopping] = useState(false)
   const [error, setError] = useState<string>()
+  const [listError, setListError] = useState<string>()
+  const [detailError, setDetailError] = useState<string>()
   const [runningOnly, setRunningOnly] = useState(false)
   const [search, setSearch] = useState("")
   const timelineRef = useRef<HTMLDivElement>(null)
+  const refreshList = useRef<(invalidate?: boolean) => void>(() => undefined)
+  const refreshDetail = useRef<(invalidate?: boolean) => void>(() => undefined)
+  const detailJobId = useRef<string | undefined>(undefined)
 
   useEffect(() => {
-    let alive = true
-    const poll = async () => {
-      try {
-        const items = await fetchSubagentSessions()
-        if (!alive) return
+    const request = createRefresh(
+      fetchSubagentSessions,
+      (items) => {
         setSessions(items)
+        setListError(undefined)
         const scoped = items.filter(
           (session) => !agentFilter || session.owner_agent_id === agentFilter
         )
@@ -90,25 +95,38 @@ export function SubagentActivity({
             ? current
             : scoped[0]?.job_id
         )
-      } catch (failure) {
-        if (alive) setError(failure instanceof Error ? failure.message : String(failure))
-      }
-    }
-    void poll()
+      },
+      setListError
+    )
+    refreshList.current = request.refresh
+    request.refresh()
     const stream =
       !IS_MOCK && typeof EventSource !== "undefined"
         ? new EventSource("/ui/api/subagents/events")
         : undefined
-    stream?.addEventListener("open", () => void poll())
-    stream?.addEventListener("change", () => void poll())
+    const refresh = () => {
+      request.refresh()
+      refreshDetail.current()
+    }
+    stream?.addEventListener("open", refresh)
+    stream?.addEventListener("change", (event) => {
+      request.refresh()
+      try {
+        const data = JSON.parse((event as MessageEvent).data) as { jobId?: string }
+        if (data.jobId === detailJobId.current) refreshDetail.current()
+      } catch {
+        refreshDetail.current()
+      }
+    })
     const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") void poll()
+      if (document.visibilityState === "visible") refresh()
     }
     document.addEventListener("visibilitychange", onVisibilityChange)
     // Fallback if the EventSource connection is interrupted or unavailable.
-    const timer = window.setInterval(() => void poll(), stream ? 20_000 : 2_000)
+    const timer = window.setInterval(refresh, stream ? 20_000 : 2_000)
     return () => {
-      alive = false
+      request.dispose()
+      refreshList.current = () => undefined
       stream?.close()
       document.removeEventListener("visibilitychange", onVisibilityChange)
       window.clearInterval(timer)
@@ -116,40 +134,22 @@ export function SubagentActivity({
   }, [agentFilter])
 
   useEffect(() => {
+    setDetailError(undefined)
+    detailJobId.current = selectedId
     if (!selectedId) return
-    let alive = true
-    const poll = async () => {
-      try {
-        const next = await fetchSubagentSession(selectedId)
-        if (alive) setDetail(next)
-      } catch (failure) {
-        if (alive) setError(failure instanceof Error ? failure.message : String(failure))
-      }
-    }
-    void poll()
-    const stream =
-      !IS_MOCK && typeof EventSource !== "undefined"
-        ? new EventSource("/ui/api/subagents/events")
-        : undefined
-    stream?.addEventListener("open", () => void poll())
-    stream?.addEventListener("change", (event) => {
-      try {
-        const data = JSON.parse((event as MessageEvent).data) as { jobId?: string }
-        if (data.jobId === selectedId) void poll()
-      } catch {
-        void poll()
-      }
-    })
-    const onVisibilityChange = () => {
-      if (document.visibilityState === "visible") void poll()
-    }
-    document.addEventListener("visibilitychange", onVisibilityChange)
-    const timer = window.setInterval(() => void poll(), stream ? 20_000 : 1_500)
+    const request = createRefresh(
+      (signal) => fetchSubagentSession(selectedId, signal),
+      (next) => {
+        setDetail(next)
+        setDetailError(undefined)
+      },
+      setDetailError
+    )
+    refreshDetail.current = request.refresh
+    request.refresh()
     return () => {
-      alive = false
-      stream?.close()
-      document.removeEventListener("visibilitychange", onVisibilityChange)
-      window.clearInterval(timer)
+      request.dispose()
+      refreshDetail.current = () => undefined
     }
   }, [selectedId])
 
@@ -166,7 +166,8 @@ export function SubagentActivity({
     setError(undefined)
     try {
       const next = await steerSubagentSession(selectedId, message)
-      setDetail(next)
+      setDetail((current) => (current?.job_id === next.job_id ? next : current))
+      refreshDetail.current(true)
       setDraft("")
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
@@ -181,8 +182,9 @@ export function SubagentActivity({
     setError(undefined)
     try {
       const next = await stopSubagentSession(selectedId)
-      setDetail(next)
-      setSessions(await fetchSubagentSessions())
+      setDetail((current) => (current?.job_id === next.job_id ? next : current))
+      refreshDetail.current(true)
+      refreshList.current(true)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
     } finally {
@@ -218,8 +220,10 @@ export function SubagentActivity({
         )
         setSelectedId(updated.job_id)
       } else updated = await retrySubagentSession(selectedId)
-      setDetail(updated)
-      setSessions(await fetchSubagentSessions())
+      if (action === "fork") setDetail(updated)
+      else setDetail((current) => (current?.job_id === updated.job_id ? updated : current))
+      refreshDetail.current(true)
+      refreshList.current(true)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     }
@@ -229,26 +233,41 @@ export function SubagentActivity({
     if (!selectedId || !window.confirm(t("subagents.restoreSnapshotConfirm"))) return
     setError(undefined)
     try {
-      setDetail(await restoreSubagentSnapshot(selectedId, snapshotId, operation))
+      const next = await restoreSubagentSnapshot(selectedId, snapshotId, operation)
+      setDetail((current) => (current?.job_id === next.job_id ? next : current))
+      refreshDetail.current(true)
     } catch (failure) {
       setError(failure instanceof Error ? failure.message : String(failure))
     }
   }
 
   async function deleteSelected() {
-    if (!selectedId || deleting) return
+    if (!deleteTarget || deleting) return
+    const id = deleteTarget
     setDeleting(true)
     setError(undefined)
     try {
-      await deleteSubagentSession(selectedId)
-      setDeleteConfirmOpen(false)
-      setDetail(undefined)
-      setSelectedId(undefined)
-      setMobilePanel("sessions")
-      setSessions(await fetchSubagentSessions())
+      await deleteSubagentSession(id)
+      setDeleteTarget(undefined)
+      setDetail((current) => (current?.job_id === id ? undefined : current))
+      setSelectedId((current) => (current === id ? undefined : current))
+      if (selectedId === id) setMobilePanel("sessions")
+      setSessions((current) => {
+        const removed = new Set([id])
+        let previousSize = 0
+        while (previousSize !== removed.size) {
+          previousSize = removed.size
+          for (const session of current) {
+            if (session.parent_id && removed.has(session.parent_id)) removed.add(session.job_id)
+          }
+        }
+        return current.filter((session) => !removed.has(session.job_id))
+      })
+      refreshList.current(true)
+      if (selectedId !== id) refreshDetail.current(true)
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : String(cause))
-      setDeleteConfirmOpen(false)
+      setDeleteTarget(undefined)
     } finally {
       setDeleting(false)
     }
@@ -256,10 +275,15 @@ export function SubagentActivity({
 
   function selectSession(id: string) {
     setMobilePanel("detail")
+    if (id === selectedId) {
+      refreshDetail.current()
+      return
+    }
     setSelectedId(id)
     setDetail(undefined)
     setDraft("")
     setError(undefined)
+    setDetailError(undefined)
   }
 
   const scopedSessions = sessions.filter(
@@ -276,7 +300,7 @@ export function SubagentActivity({
   const selected = detail?.job_id === selectedId ? detail : undefined
 
   return (
-    <div className="subagent-workspace" data-mobile-panel={mobilePanel}>
+    <div className="subagent-workspace" data-mobile-panel={selectedId ? mobilePanel : "sessions"}>
       <aside className="flex min-h-0 min-w-0 flex-col overflow-hidden border-r bg-card">
         <div className="border-b px-4 pb-3 pt-4">
           <div className="flex items-center justify-between gap-2">
@@ -475,7 +499,7 @@ export function SubagentActivity({
                 )}
                 <button
                   type="button"
-                  onClick={() => setDeleteConfirmOpen(true)}
+                  onClick={() => setDeleteTarget(selected.job_id)}
                   disabled={deleting}
                   title={t("subagents.deleteSession")}
                   aria-label={t("subagents.deleteSession")}
@@ -636,16 +660,44 @@ export function SubagentActivity({
             </div>
           </>
         ) : (
-          <div className="flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
+          <div className="relative flex flex-1 flex-col items-center justify-center gap-3 text-muted-foreground">
+            <button
+              type="button"
+              className="mobile-session-back absolute left-4 top-4"
+              aria-label={t("subagents.sessions")}
+              onClick={() => setMobilePanel("sessions")}
+            >
+              <ArrowLeft className="size-4" />
+            </button>
             <BrainCircuit className="size-9 opacity-40" />
-            <p className="text-sm">{t("subagents.selectSession")}</p>
+            {selectedId && !detailError ? (
+              <LoaderCircle className="size-5 animate-spin" />
+            ) : (
+              <p className="text-sm">{t("subagents.selectSession")}</p>
+            )}
+            {selectedId && detailError && (
+              <Button
+                type="button"
+                size="sm"
+                variant="outline"
+                onClick={() => refreshDetail.current()}
+              >
+                <RotateCw className="size-3.5" /> {t("common.refresh")}
+              </Button>
+            )}
           </div>
+        )}
+        {listError && <p className="border-t px-5 py-2 text-xs text-destructive">{listError}</p>}
+        {detailError && (
+          <p className="border-t px-5 py-2 text-xs text-destructive">{detailError}</p>
         )}
         {error && <p className="border-t px-5 py-2 text-xs text-destructive">{error}</p>}
       </section>
       <ConfirmDialog
-        open={deleteConfirmOpen}
-        onOpenChange={setDeleteConfirmOpen}
+        open={Boolean(deleteTarget)}
+        onOpenChange={(open) => {
+          if (!open && !deleting) setDeleteTarget(undefined)
+        }}
         title={t("subagents.deleteSession")}
         description={t("subagents.deleteSessionConfirm")}
         confirmLabel={t("common.delete")}

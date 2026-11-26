@@ -261,7 +261,7 @@ export async function startMcpHttpServer(
     tailnetReconcileTimer = setInterval(() => {
       try {
         const settings = loadPublicConfig(MCP_CONFIG.publicConfigFile).tailnet_ui
-        void tailnetUi.apply(settings).catch((error: unknown) => {
+        void tailnetUi.reconcile(settings).catch((error: unknown) => {
           console.error("Could not reconcile Tailnet UI:", error)
         })
       } catch (error) {

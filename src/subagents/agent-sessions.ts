@@ -229,7 +229,13 @@ export class SubagentSessions {
 
   /** A deleted job releases its parent's slot; descendants are removed with it. */
   deleteSession(id: string, owner?: string): number {
-    const item = this.requireSession(id)
+    const item = this.store.get(id)
+    // Dashboard DELETE is idempotent, including when the owner was removed first.
+    // Keep the scoped MCP contract: an unknown job is still an error for an Agent.
+    if (!item) {
+      if (owner !== undefined) this.requireSession(id)
+      return 0
+    }
     if (owner !== undefined) this.assertOwner(item, owner)
     const ids = new Set(this.store.subtreeIds(id))
     const records = this.store.list().filter((entry) => ids.has(entry.job_id))

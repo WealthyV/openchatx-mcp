@@ -1,4 +1,4 @@
-import { execFileSync } from "node:child_process"
+import { execFile } from "node:child_process"
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from "node:fs"
 import {
   createServer,
@@ -8,6 +8,7 @@ import {
 } from "node:http"
 import { dirname, join } from "node:path"
 import process from "node:process"
+import { promisify } from "node:util"
 
 import type { OpenChatXPublicConfig } from "../public-config.cjs"
 
@@ -28,15 +29,19 @@ interface ActiveForward {
 }
 
 export interface TailnetCli {
-  run(settings: Pick<TailnetUiSettings, "cli_path" | "socket_path">, args: string[]): string
+  run(
+    settings: Pick<TailnetUiSettings, "cli_path" | "socket_path">,
+    args: string[]
+  ): string | Promise<string>
 }
 
 const OCTET_PATTERN = /^(?:0|[1-9][0-9]{0,2})$/u
 const UI_PATH_PATTERN = /^\/ui(?:\/|$)/u
 const LOCAL_TARGET_PATTERN = /^127\.0\.0\.1:[0-9]{1,5}$/u
+const runCli = promisify(execFile)
 
 const defaultCli: TailnetCli = {
-  run(_settings, args) {
+  async run(_settings, args) {
     let candidates: string[]
     if (process.platform === "win32")
       candidates = ["tailscale.exe", "C:\\Program Files\\Tailscale\\tailscale.exe"]
@@ -50,11 +55,12 @@ const defaultCli: TailnetCli = {
     let lastError: Error | undefined
     for (const binary of candidates) {
       try {
-        const output = execFileSync(binary, args, {
+        const { stdout } = await runCli(binary, args, {
           encoding: "utf8",
           timeout: 10_000,
           maxBuffer: 1024 * 1024,
-        }).trim()
+        })
+        const output = stdout.trim()
         // A macOS GUI executable can report a failure with exit status 0.
         if (!isExpectedCliOutput(args, output)) {
           lastError = new Error(
@@ -163,6 +169,7 @@ export class TailnetUiManager {
   private readonly stateFile: string
   private active?: ActiveForward
   private pending: Promise<void> = Promise.resolve()
+  private queued = 0
 
   constructor(
     private readonly port: number,
@@ -173,11 +180,20 @@ export class TailnetUiManager {
   }
 
   async apply(settings: TailnetUiSettings): Promise<void> {
-    // A settings save and the periodic reconnect check can happen at the same time.
-    // Serialize them so a stale check cannot replace a newly created forward.
-    const next = this.pending.then(() => this.applyOnce(settings))
+    this.queued += 1
+    const next = this.pending
+      .then(() => this.applyOnce(settings))
+      .finally(() => {
+        this.queued -= 1
+      })
     this.pending = next.catch(() => undefined)
     await next
+  }
+
+  async reconcile(settings: TailnetUiSettings): Promise<void> {
+    // A periodic check reads persisted settings. Do not queue that older value
+    // behind a user-initiated settings update that has not been persisted yet.
+    if (this.queued === 0) await this.apply(settings)
   }
 
   private async applyOnce(settings: TailnetUiSettings): Promise<void> {
@@ -185,12 +201,12 @@ export class TailnetUiManager {
       await this.disable()
       return
     }
-    const ownIP = this.cli.run(settings, ["ip", "-4"]).trim()
+    const ownIP = (await this.cli.run(settings, ["ip", "-4"])).trim()
     if (!isTailnetIPv4(ownIP))
       throw new Error(`Could not detect a valid local Tailscale IPv4 address: ${ownIP}`)
 
     const stored = this.active?.record ?? this.readRecord()
-    const forward = this.currentForward(settings)
+    const forward = await this.currentForward(settings)
     // An older OpenChatX setup forwarded the Tailnet port straight to its
     // localhost runtime. Adopt only that exact legacy target, never an
     // unrelated forward, and replace it with the restricted /ui proxy.
@@ -223,10 +239,10 @@ export class TailnetUiManager {
         })
       })
       const target = `127.0.0.1:${localPort}`
-      if (forward) this.cli.run(settings, ["serve", `--tcp=${this.port}`, "off"])
+      if (forward) await this.cli.run(settings, ["serve", `--tcp=${this.port}`, "off"])
       try {
-        this.cli.run(settings, ["serve", "--bg", `--tcp=${this.port}`, `tcp://${target}`])
-        if (this.currentForward(settings) !== target)
+        await this.cli.run(settings, ["serve", "--bg", `--tcp=${this.port}`, `tcp://${target}`])
+        if ((await this.currentForward(settings)) !== target)
           throw new Error("Tailscale Serve did not activate")
         const record: OwnedForward = {
           port: this.port,
@@ -242,9 +258,14 @@ export class TailnetUiManager {
         old?.server.close()
       } catch (error) {
         try {
-          this.cli.run(settings, ["serve", `--tcp=${this.port}`, "off"])
+          await this.cli.run(settings, ["serve", `--tcp=${this.port}`, "off"])
           if (forward)
-            this.cli.run(settings, ["serve", "--bg", `--tcp=${this.port}`, `tcp://${forward}`])
+            await this.cli.run(settings, [
+              "serve",
+              "--bg",
+              `--tcp=${this.port}`,
+              `tcp://${forward}`,
+            ])
         } catch (rollbackError) {
           console.error("Could not restore previous Tailscale Serve rule:", rollbackError)
         }
@@ -269,20 +290,20 @@ export class TailnetUiManager {
     const record = this.active?.record ?? this.readRecord()
     if (record) {
       const settings = { cli_path: record.cli_path, socket_path: record.socket_path }
-      const existing = this.currentForward(settings, record.port)
+      const existing = await this.currentForward(settings, record.port)
       if (existing === record.target)
-        this.cli.run(settings, ["serve", `--tcp=${record.port}`, "off"])
+        await this.cli.run(settings, ["serve", `--tcp=${record.port}`, "off"])
       if (existsSync(this.stateFile)) unlinkSync(this.stateFile)
     }
     if (this.active) this.active.server.close()
     this.active = undefined
   }
 
-  private currentForward(
+  private async currentForward(
     settings: Pick<TailnetUiSettings, "cli_path" | "socket_path">,
     port = this.port
-  ): string | undefined {
-    const status: unknown = JSON.parse(this.cli.run(settings, ["serve", "status", "--json"]))
+  ): Promise<string | undefined> {
+    const status: unknown = JSON.parse(await this.cli.run(settings, ["serve", "status", "--json"]))
     if (!isRecord(status) || !isRecord(status.TCP)) return
     const entry = status.TCP[String(port)]
     return isRecord(entry) && typeof entry.TCPForward === "string" ? entry.TCPForward : undefined

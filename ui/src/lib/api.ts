@@ -88,12 +88,15 @@ export async function saveRuntimeSettings(
   return { settings: body.settings, restartRequired: body.restartRequired === true }
 }
 
-export async function fetchAgents(): Promise<Agent[]> {
+export async function fetchAgents(signal?: AbortSignal): Promise<Agent[]> {
   if (MOCK_DASHBOARD) return fetchMockAgents()
-  const response = await fetch("/ui/api/agents")
-  if (!response.ok) throw new Error(`Failed to load agents (${response.status})`)
-  const body = (await response.json()) as { agents?: Agent[] }
-  return body.agents ?? []
+  const response = await fetch("/ui/api/agents", { cache: "no-store", signal })
+  const body = (await response.json().catch(() => undefined)) as
+    | { agents?: Agent[]; error?: string }
+    | undefined
+  if (!response.ok || !Array.isArray(body?.agents))
+    throw new Error(body?.error ?? `Failed to load agents (${response.status})`)
+  return body.agents
 }
 
 export async function deleteAgent(agentId: string): Promise<void> {
@@ -756,12 +759,17 @@ export function subscribeToAgents(
   onConnection: (connected: boolean) => void
 ): () => void {
   if (MOCK_DASHBOARD) return subscribeToMockAgents(onEvent, onConnection)
+  if (typeof EventSource === "undefined") return () => undefined
   const source = new EventSource("/ui/api/events")
   source.onopen = () => onConnection(true)
   source.onerror = () => onConnection(false)
   source.onmessage = (message) => {
-    const event = JSON.parse(message.data) as AgentEvent
-    if (event.type === "agent_changed" || event.type === "agent_removed") onEvent(event)
+    try {
+      const event = JSON.parse(message.data) as AgentEvent
+      if (event.type === "agent_changed" || event.type === "agent_removed") onEvent(event)
+    } catch {
+      // The regular snapshot refresh will recover from a malformed stream event.
+    }
   }
   return () => source.close()
 }
@@ -877,11 +885,16 @@ export async function openMcpConfigInFinder(): Promise<boolean> {
   return true
 }
 
-export async function fetchSubagentSessions(): Promise<SubagentSessionSummary[]> {
+export async function fetchSubagentSessions(
+  signal?: AbortSignal
+): Promise<SubagentSessionSummary[]> {
   if (MOCK_DASHBOARD) return mockSubagentSessions()
-  const response = await fetch("/ui/api/subagents/sessions")
-  if (!response.ok) throw new Error(`Failed to load subagent sessions (HTTP ${response.status}).`)
-  const body = (await response.json()) as { sessions: SubagentSessionSummary[] }
+  const response = await fetch("/ui/api/subagents/sessions", { cache: "no-store", signal })
+  const body = (await response.json().catch(() => undefined)) as
+    | { sessions?: SubagentSessionSummary[]; error?: string }
+    | undefined
+  if (!response.ok || !Array.isArray(body?.sessions))
+    throw new Error(body?.error ?? `Failed to load subagent sessions (HTTP ${response.status}).`)
   return body.sessions
 }
 
@@ -927,11 +940,20 @@ export async function deleteSubagentSession(id: string): Promise<void> {
   }
 }
 
-export async function fetchSubagentSession(id: string): Promise<SubagentSessionDetail> {
+export async function fetchSubagentSession(
+  id: string,
+  signal?: AbortSignal
+): Promise<SubagentSessionDetail> {
   if (MOCK_DASHBOARD) return mockSubagentSession(id)
-  const response = await fetch(`/ui/api/subagents/sessions/${encodeURIComponent(id)}`)
-  if (!response.ok) throw new Error(`Failed to load subagent session (HTTP ${response.status}).`)
-  const body = (await response.json()) as { session: SubagentSessionDetail }
+  const response = await fetch(`/ui/api/subagents/sessions/${encodeURIComponent(id)}`, {
+    cache: "no-store",
+    signal,
+  })
+  const body = (await response.json().catch(() => undefined)) as
+    | { session?: SubagentSessionDetail; error?: string }
+    | undefined
+  if (!response.ok || body?.session?.job_id !== id || !Array.isArray(body.session.events))
+    throw new Error(body?.error ?? `Failed to load subagent session (HTTP ${response.status}).`)
   return body.session
 }
 

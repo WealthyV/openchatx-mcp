@@ -42,6 +42,7 @@ import {
   type RecoveryState,
   type UpdateCheck,
 } from "./lib/api"
+import { createRefresh } from "./lib/refresh"
 import {
   fetchRuntimeControl,
   type RuntimeControlState,
@@ -173,18 +174,11 @@ export function App() {
   }
 
   useEffect(() => {
-    let mounted = true
-    const refresh = () => {
-      void fetchSubagentSessions()
-        .then((sessions) => {
-          if (mounted) setSubagentSessions(sessions)
-        })
-        .catch(() => undefined)
-    }
-    refresh()
-    const timer = window.setInterval(refresh, 2_000)
+    const request = createRefresh(fetchSubagentSessions, setSubagentSessions, () => undefined)
+    request.refresh()
+    const timer = window.setInterval(() => request.refresh(), 2_000)
     return () => {
-      mounted = false
+      request.dispose()
       window.clearInterval(timer)
     }
   }, [])
@@ -227,7 +221,7 @@ export function App() {
       case "subagent-activity":
         return (
           <SubagentActivity
-            key={focusedSubagent?.agentId ?? "all"}
+            key={focusedSubagent?.jobId ?? "all"}
             onBack={back}
             initialSessionId={focusedSubagent?.jobId}
             agentFilter={focusedSubagent?.agentId}
