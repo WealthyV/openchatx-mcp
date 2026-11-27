@@ -62,6 +62,7 @@ async function buildWindowsDesktop(): Promise<void> {
   await Promise.all([
     copyTree("dist", join(runtimeRoot, "dist")),
     copyTree("ui/dist", join(runtimeRoot, "ui/dist")),
+    copyFile("ui/public/openchatx-mcp-icon.png", join(runtimeRoot, "ui/public/openchatx-mcp-icon.png")),
     copyTree("store", join(runtimeRoot, "store")),
     copyTree("src/tools/start-here/prompts", join(runtimeRoot, "src/tools/start-here/prompts")),
     copyFile(
