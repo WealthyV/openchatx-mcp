@@ -63,7 +63,10 @@ async function buildDesktop(): Promise<void> {
   await Promise.all([
     copyTree("dist", join(runtimePath, "dist")),
     copyTree("ui/dist", join(runtimePath, "ui/dist")),
-    copyFile("ui/public/openchatx-mcp-icon.png", join(runtimePath, "ui/public/openchatx-mcp-icon.png")),
+    copyFile(
+      "ui/public/openchatx-mcp-icon.png",
+      join(runtimePath, "ui/public/openchatx-mcp-icon.png")
+    ),
     copyTree("node_modules", join(runtimePath, "node_modules")),
     copyTree("store", join(runtimePath, "store")),
     copyTree("src/tools/start-here/prompts", join(runtimePath, "src/tools/start-here/prompts")),
