@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process"
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import { cp, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises"
 import { tmpdir } from "node:os"
 import { dirname, join } from "node:path"
 import process from "node:process"
@@ -16,6 +16,7 @@ const runtimeRoot = join(
 )
 const node = join(runtimeRoot, "bin", "node")
 const tunnelClient = join(runtimeRoot, "bin", "tunnel-client")
+const serverIcon = join(runtimeRoot, "ui", "public", "openchatx-mcp-icon.png")
 const smokeRoot = await mkdtemp(join(tmpdir(), "openchatx-desktop-smoke-"))
 const port = 34333
 const configDir = join(smokeRoot, "config")
@@ -76,6 +77,7 @@ child.stderr.on("data", (chunk: Buffer) => {
 })
 
 try {
+  await stat(serverIcon)
   const health = await waitForHealth(`http://127.0.0.1:${port}/healthz`)
   if (!health.ok) throw new Error(`Desktop runtime health failed: ${health.status}`)
   const instance = health.headers.get("x-openchatx-instance")
